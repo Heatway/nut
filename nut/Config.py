@@ -3,11 +3,11 @@
 import json
 import os
 import time
+import collections
 from binascii import unhexlify as uhx
-
 from nut import Print
-
 from nut.config_impl.download import Download
+from collections.abc import Mapping
 
 threads = 1
 jsonOutput = False
@@ -16,8 +16,10 @@ dryRun = False
 shardCount = None
 shardIndex = None
 reverse = False
-isScanning = False
+extractVersion = False
 autoUpdateTitleDb = True
+allowNoMetadata = True
+cdnCacheOnly = False
 
 region = None
 
@@ -31,8 +33,33 @@ language = 'en'
 
 titleUrls = []
 pullUrls = []
+original = {}
 
 g_regionLanguages = None
+
+DEFAULT_REGION_LANGUAGES = '{"CO":["en","es"],"AR":["en","es"],"CL":["en","es"],\
+	"PE":["en","es"],"KR":["ko"],"HK":["zh"],"CN":["zh"],"NZ":["en"],"AT":["de"],\
+	"BE":["fr","nl"],"CZ":["en"],"DK":["en"],"ES":["es"],"FI":["en"],"GR":["en"],\
+	"HU":["en"],"NL":["nl"],"NO":["en"],"PL":["en"],"PT":["pt"],"RU":["ru"],"ZA":["en"],\
+	"SE":["en"],"MX":["en","es"],"IT":["it"],"CA":["en","fr"],"FR":["fr"],"DE":["de"],\
+	"JP":["ja"],"AU":["en"],"GB":["en"],"US":["es", "en"]}'
+
+def dict_merge(dct, merge_dct, add_keys=True):
+	dct = dct.copy()
+	if not add_keys:
+		merge_dct = {
+			k: merge_dct[k]
+			for k in set(dct).intersection(set(merge_dct))
+		}
+
+	for k, _ in merge_dct.items():
+		if (k in dct and isinstance(dct[k], dict)
+				and isinstance(merge_dct[k], Mapping)):
+			dct[k] = dict_merge(dct[k], merge_dct[k], add_keys=add_keys)
+		else:
+			dct[k] = merge_dct[k]
+
+	return dct
 
 def getGdriveCredentialsFile():
 	files = ['credentials.json', 'conf/credentials.json']
@@ -50,6 +77,7 @@ class Server:  # pylint: disable=too-few-public-methods
 	def __init__(self):
 		self.hostname = '0.0.0.0'
 		self.port = 9000
+		self.enableLocalDriveAccess = 1
 
 class Compression:  # pylint: disable=too-few-public-methods
 	"""Compression-related settings
@@ -249,7 +277,7 @@ def getPath(path, name, default):
 def forceExt(path, ext):
 	return os.path.splitext(path)[0] + ext
 
-def set(json_, paths_, value):  # pylint: disable=redefined-builtin
+def jset(json_, paths_, value):  # pylint: disable=redefined-builtin
 	last = paths_.pop()
 	for path in paths_:
 		if path not in json_:
@@ -267,16 +295,17 @@ def save(confFile='conf/nut.conf'):
 	except BaseException:  # pylint: disable=broad-except
 		pass
 
-	set(j, ['paths'], paths.__dict__)
-	set(j, ['compression'], compression.__dict__)
-	set(j, ['pullUrls'], pullUrls)
-	set(j, ['threads'], threads)
-	set(j, ['download'], download.__dict__)
-	set(j, ['server', 'hostname'], server.hostname)
-	set(j, ['server', 'port'], server.port)
+	jset(j, ['paths'], paths.__dict__)
+	jset(j, ['compression'], compression.__dict__)
+	jset(j, ['pullUrls'], pullUrls)
+	jset(j, ['threads'], threads)
+	jset(j, ['download'], download.__dict__)
+	jset(j, ['server', 'hostname'], server.hostname)
+	jset(j, ['server', 'port'], server.port)
 
-	set(j, ['autolaunchBrowser'], autolaunchBrowser)
-	set(j, ['autoUpdateTitleDb'], autoUpdateTitleDb)
+	jset(j, ['autolaunchBrowser'], autolaunchBrowser)
+	jset(j, ['autoUpdateTitleDb'], autoUpdateTitleDb)
+	jset(j, ['allowNoMetadata'], allowNoMetadata)
 
 	with open(confFile, 'w', encoding='utf-8') as f:
 		Print.debug("writing config to filesystem")
@@ -284,17 +313,24 @@ def save(confFile='conf/nut.conf'):
 
 def load(confFile):  # pylint: disable=too-many-branches,too-many-statements
 	global threads  # pylint: disable=global-statement
-	global jsonOutput  # pylint: disable=global-statement
-	global titleUrls  # pylint: disable=global-statement
-	global pullUrls  # pylint: disable=global-statement
+	global jsonOutput  # pylint: disable=global-statement,global-variable-not-assigned
+	global titleUrls  # pylint: disable=global-statement,global-variable-not-assigned
+	global pullUrls  # pylint: disable=global-statement,global-variable-not-assigned
 	global region  # pylint: disable=global-statement
 	global language  # pylint: disable=global-statement
-	global compression  # pylint: disable=global-statement
+	global compression  # pylint: disable=global-statement,global-variable-not-assigned
 	global autolaunchBrowser  # pylint: disable=global-statement
 	global autoUpdateTitleDb  # pylint: disable=global-statement
+	global original  # pylint: disable=global-statement
+	global allowNoMetadata  # pylint: disable=global-statement
 
 	with open(confFile, encoding='utf8') as f:
-		j = json.load(f)
+		try:
+			j = json.load(f)
+			original = dict_merge(original, j)
+		except BaseException: # pylint: disable=broad-except
+			print(f"Failed to load config file: {confFile}") # use normal print because of initialization order of Status / Print
+			raise
 
 		try:
 			region = j['region']
@@ -563,6 +599,11 @@ def load(confFile):  # pylint: disable=too-many-branches,too-many-statements
 			pass
 
 		try:
+			dauth.baseURL = j['cdn']['dAuth']['baseURL']
+		except BaseException:  # pylint: disable=broad-except
+			pass
+
+		try:
 			threads = int(j['threads'])
 		except BaseException:  # pylint: disable=broad-except
 			pass
@@ -583,7 +624,17 @@ def load(confFile):  # pylint: disable=too-many-branches,too-many-statements
 			pass
 
 		try:
+			server.enableLocalDriveAccess = int(j['server']['enableLocalDriveAccess'])
+		except BaseException:  # pylint: disable=broad-except
+			pass
+
+		try:
 			autoUpdateTitleDb = j['autoUpdateTitleDb']
+		except BaseException:  # pylint: disable=broad-except
+			pass
+
+		try:
+			allowNoMetadata = j['allowNoMetadata']
 		except BaseException:  # pylint: disable=broad-except
 			pass
 
@@ -644,12 +695,7 @@ def regionLanguages(fileName='titledb/languages.json'):
 		with open(fileName, encoding='utf-8-sig') as f:
 			g_regionLanguages = json.loads(f.read())
 	except BaseException:  # pylint: disable=broad-except
-		g_regionLanguages = json.loads('{"CO":["en","es"],"AR":["en","es"],"CL":["en","es"],\
-			"PE":["en","es"],"KR":["ko"],"HK":["zh"],"CN":["zh"],"NZ":["en"],"AT":["de"],\
-			"BE":["fr","nl"],"CZ":["en"],"DK":["en"],"ES":["es"],"FI":["en"],"GR":["en"],\
-			"HU":["en"],"NL":["nl"],"NO":["en"],"PL":["en"],"PT":["pt"],"RU":["ru"],"ZA":["en"],\
-			"SE":["en"],"MX":["en","es"],"IT":["it"],"CA":["en","fr"],"FR":["fr"],"DE":["de"],\
-			"JP":["ja"],"AU":["en"],"GB":["en"],"US":["es", "en"]}')
+		g_regionLanguages = json.loads(DEFAULT_REGION_LANGUAGES)
 
 	return g_regionLanguages
 
@@ -680,7 +726,7 @@ def loadTitleBlacklist():
 		if 'blacklist' not in path:
 			continue
 
-		print('loading blacklist %s' % path)
+		print(f"loading blacklist {path}")
 
 		try:
 			with open(path, encoding='utf8') as f:
@@ -707,7 +753,7 @@ class DAuthToken:
 		self.clientId = clientId
 
 	def fileName(self):
-		return 'dauth.%s.token' % self.clientId
+		return f"dauth.{self.clientId}.token"
 
 	def get(self):
 		if not self.token:
@@ -754,11 +800,11 @@ class Cdn:  # pylint: disable=too-few-public-methods
 	"""
 
 	def __init__(self):
-		self.region = None
+		self.region = 'US'
 		self.firmware = None
 		self.deviceId = None
-		self.environment = None
-		self.clientIds = None
+		self.environment = 'lp1'
+		self.clientIds = { "eShop": "93af0acb26258de9", "atumC1": "3117b250cab38f45", "tigers": "d5b6cac2c1514c56", "tagaya": "41f4a6491028e3c4"}
 
 	def getDeviceId(self):
 		if not self.deviceId:
@@ -787,7 +833,7 @@ class EdgeToken:
 		self.clientId = clientId
 
 	def fileName(self):
-		return 'edge.%s.token' % self.clientId
+		return f"edge.{self.clientId}.token"
 
 	def get(self):
 		if not self.token:
@@ -817,7 +863,7 @@ class DAuth:  # pylint: disable=too-few-public-methods
 		self.userAgent = None
 		self.challenge = None
 		self.sysDigest = None
-		self.baseURL = 'https://dauth-lp1.ndas.srv.nintendo.net/v6/'
+		self.baseURL = None
 
 
 cdn = Cdn()
@@ -847,9 +893,8 @@ try:
 	os.mkdir(paths.nspOut)
 except BaseException:  # pylint: disable=broad-except
 	pass
-	
+
 try:
 	os.mkdir(paths.titleImages)
 except BaseException:  # pylint: disable=broad-except
 	pass
-

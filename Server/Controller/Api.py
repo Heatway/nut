@@ -23,6 +23,7 @@ from google.auth.transport.requests import Request
 import hashlib
 import traceback
 import Fs.driver
+import Fs.driver.init
 
 try:
 	from PIL import Image
@@ -237,13 +238,11 @@ def getPreload(request, response):
 def getInstall(request, response):
 	try:
 		url = ('%s:%s@%s:%d/api/download/%s/title.nsp' % (request.user.id, request.user.password, Config.server.hostname, Config.server.port, request.bits[2]))
-		Print.info('Installing ' + url)
+		Print.info('Installing ' + str(request.bits[2]))
 		file_list_payloadBytes = url.encode('ascii')
 
 		sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		# sock.settimeout(1)
 		sock.connect((request.user.switchHost, request.user.switchPort))
-		# sock.settimeout(99999)
 
 		sock.sendall(struct.pack('!L', len(file_list_payloadBytes)) + file_list_payloadBytes)
 		while len(sock.recv(1)) < 1:
@@ -305,10 +304,12 @@ def getOffsetAndSize(start, end, size=None):
 	return [start, size]
 
 class Progress:
-	def __init__(self, response, f):
+	def __init__(self, response, f, size = None):
 		self.response = response
 		self.f = f
-		self.status = Status.create(f.size, 'Downloading ' + os.path.basename(f.url))
+		self.status = Status.create(size or f.size, 'Downloading ' + os.path.basename(f.url))
+		self.buffer = b''
+		self.chunk_size = 0x100000 * 16
 
 	def __enter__(self):
 		return self
@@ -316,14 +317,30 @@ class Progress:
 	def __exit__(self, type, value, traceback):
 		self.close()
 
+	def flush(self):
+		if len(self.buffer) > 0:
+			self.response.write(self.buffer)
+			self.status.add(len(self.buffer))
+			self.buffer = b''
+
+
 	def close(self):
+		self.flush()
+
 		if self.status is not None:
 			self.status.close()
 			self.status = None
 
 	def write(self, chunk):
-		self.response.write(chunk)
-		self.status.add(len(chunk))
+		chunk_left = self.chunk_size - len(self.buffer)
+
+		if len(chunk) < chunk_left:
+			self.buffer += chunk
+		else:
+			self.buffer += chunk[0:chunk_left]
+			self.flush()
+
+			self.write(chunk[chunk_left:])
 
 
 def serveFile(response, path, filename=None, start=None, end=None):
@@ -345,7 +362,7 @@ def serveFile(response, path, filename=None, start=None, end=None):
 			response.sendHeader()
 
 			if not response.head:
-				with Progress(response=response, f=f) as progress:
+				with Progress(response=response, f=f, size = size) as progress:
 					f.chunk(progress.write, offset=start, size=size)
 		except BaseException as e:
 			Print.error('File download exception: ' + str(e))
@@ -441,6 +458,10 @@ def listDrives():
 	drives = []
 	for label, _ in Config.paths.mapping().items():
 		drives.append(label)
+
+	if not Config.server.enableLocalDriveAccess:
+		return drives
+
 	if isWindows():
 		import string
 		import ctypes
@@ -456,9 +477,32 @@ def listDrives():
 
 	return drives
 
+def isInConfiguredPath(path):
+	path = path.lower().replace('\\', '/')
+
+	for label, value in Config.paths.mapping().items():
+		value = value.lower().replace('\\', '/')
+
+		if value and (path == value or path.startswith(value.lower())):
+			return True
+
+	return False
+
+def isBlockedPath(path):
+	if not Config.server.enableLocalDriveAccess:
+		if '..' in path:
+			return True
+
+		if not isInConfiguredPath(path):
+			return True
+
+	return False
 
 def isBlocked(path):
 	path = path.lower()
+
+	if isBlockedPath(path):
+		return True
 
 	whitelist = [
 		'.nro',
@@ -515,6 +559,9 @@ def getDirectoryList(request, response):
 			response.write(json.dumps(r))
 			return
 
+		if isBlockedPath(path):
+			raise IOError('forbidden')
+
 		for f in Fs.driver.openDir(path).ls():
 
 			if not f.isFile():
@@ -529,7 +576,8 @@ def getDirectoryList(request, response):
 
 		response.write(json.dumps(r))
 	except BaseException as e:
-		raise IOError('dir list access denied')
+		traceback.print_exc(file=sys.stdout)
+		raise IOError('dir list access denied: ' + str(e))
 
 
 def downloadProxyFile(url, response, start=None, end=None, headers={}):
@@ -594,10 +642,19 @@ def getFile(request, response, start=None, end=None):
 def getFileSize(request, response):
 	response.headers['Content-Type'] = 'application/json'
 	t = {}
+
 	path = ''
-	for i in request.bits[2:]:
-		path = os.path.join(path, i)
+
+	if len(request.bits) > 2:
+		virtualDir = request.bits[2]
+	else:
+		virtualDir = ''
+
+	path = virtualDir + ':/'
+	for i in request.bits[3:]:
+		path = Fs.driver.join(path, i)
 	path = Fs.driver.cleanPath(path)
+
 	try:
 		t['size'] = os.path.getsize(path)
 		t['mtime'] = os.path.getmtime(path)

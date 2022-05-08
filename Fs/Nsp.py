@@ -24,7 +24,7 @@ from nut import blockchain
 MEDIA_SIZE = 0x200
 
 class Nsp(Pfs0, IndexedFile):
-	def __init__(self, path=None, mode='rb'):
+	def __init__(self, path=None, mode='rb', cryptoType = -1, cryptoKey = -1, cryptoCounter = -1):
 		self.path = None
 		self.titleId = None
 		self.hasValidTicket = None
@@ -33,30 +33,15 @@ class Nsp(Pfs0, IndexedFile):
 		self.fileSize = None
 		self.fileModified = None
 		self.extractedNcaMeta = False
+		self.verified = None
+		self.attributes = {}
 
-		super(Nsp, self).__init__(None, path, mode)
-
-		if path:
-			self.setPath(path)
-			# if files:
-			#	self.pack(files)
+		Pfs0.__init__(self, None, path, mode, cryptoType, cryptoKey, cryptoCounter)
+		IndexedFile.__init__(self, path, mode, cryptoType, cryptoKey, cryptoCounter)
 
 		if self.titleId and self.isUnlockable():
 			Print.info('unlockable title found ' + self.path)
 		#	self.unlock()
-
-	def getFileSize(self):
-		if self.fileSize is None:
-			try:
-				self.fileSize = os.path.getsize(self.path)
-			except BaseException as e:
-				Print.error(f"getting file size of title `{self.path}`: {str(e)}")
-		return self.fileSize
-
-	def getFileModified(self):
-		if self.fileModified is None:
-			self.fileModified = os.path.getmtime(self.path)
-		return self.fileModified
 
 	def loadCsv(self, line, map=['id', 'path', 'version', 'timestamp', 'hasValidTicket', 'extractedNcaMeta', 'fileSize']):
 		split = line.split('|')
@@ -162,22 +147,6 @@ class Nsp(Pfs0, IndexedFile):
 			Print.info(filePath)
 
 	# extractedNcaMeta
-
-	def getExtractedNcaMeta(self):
-		if hasattr(self, 'extractedNcaMeta') and self.extractedNcaMeta:
-			return 1
-		return 0
-
-	def setExtractedNcaMeta(self, val):
-		if val and (val != 0 or val):
-			self.extractedNcaMeta = True
-		else:
-			self.extractedNcaMeta = False
-
-	def getHasValidTicket(self):
-		if self.title().isUpdate:
-			return 1
-		return (1 if self.hasValidTicket and self.hasValidTicket else 0)
 
 	def open(self, path=None, mode='rb', cryptoType=-1, cryptoKey=-1, cryptoCounter=-1):
 		super(Nsp, self).open(path or self.path, mode, cryptoType, cryptoKey, cryptoCounter)

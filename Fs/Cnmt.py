@@ -16,12 +16,22 @@ class MetaEntry:
 
 class ContentEntry:
 	def __init__(self, f):
+		self.offset = f.tell()
 		self.hash = f.read(32)
 		self.ncaId = hx(f.read(16)).decode()
 		self.size = f.readInt48()
 		self.type = f.readInt8()
+		self.f = f
 
 		f.readInt8()  # junk
+
+	def setHash(self, hash):
+		self.f.seek(self.offset)
+		self.f.write(hash)
+
+	def setContentId(self, ncaId):
+		self.f.seek(self.offset + 32)
+		self.f.write(uhx(ncaId), 16)
 
 
 class Cnmt(File):
@@ -50,9 +60,31 @@ class Cnmt(File):
 		self.headerOffset = self.readInt16()
 		self.contentEntryCount = self.readInt16()
 		self.metaEntryCount = self.readInt16()
+		self.metaAttributes = self.readInt8()
 
 		self.contentEntries = []
 		self.metaEntries = []
+
+		self.seek(0x18)
+		self.requiredDownloadSystemVersion = self.readInt32()
+
+		self.seek(0x20)
+		self.requiredSystemVersion = None
+		self.requiredApplicationVersion = None
+		self.otherApplicationId = None
+
+		if self.titleType == 0x80: #base
+			self.otherApplicationId = hx(self.read(8)[::-1]).decode()
+			self.requiredSystemVersion = self.readInt32()
+			self.requiredApplicationVersion = self.readInt32()
+
+		if self.titleType == 0x81: #patch
+			self.otherApplicationId = hx(self.read(8)[::-1]).decode()
+			self.requiredSystemVersion = self.readInt32()
+
+		if self.titleType == 0x82: #DLC
+			self.otherApplicationId = hx(self.read(8)[::-1]).decode()
+			self.requiredApplicationVersion = self.readInt32()
 
 		self.seek(0x20 + self.headerOffset)
 		for i in range(self.contentEntryCount):
@@ -61,13 +93,47 @@ class Cnmt(File):
 		for i in range(self.metaEntryCount):
 			self.metaEntries.append(MetaEntry(self))
 
+	def setHash(self, contentId, hash):
+		contentId = contentId.lower()
+
+		if '.' in contentId:
+			contentId = contentId.split('.')[0]
+
+		for entry in self.contentEntries:
+			if entry.ncaId == contentId:
+				entry.setHash(uhx(hash))
+
+
+	def renameNca(self, oldName, newName, hash = None):
+		oldName = oldName.lower()
+		newName = newName.lower()
+
+		if '.' in oldName:
+			oldName = oldName.split('.')[0]
+
+		if '.' in newName:
+			newName = newName.split('.')[0]
+
+		if oldName == newName:
+			return False
+
+		for entry in self.contentEntries:
+			if entry.ncaId == oldName:
+				if hash:
+					entry.setHash(uhx(hash))
+				entry.setContentId(newName)
+				return True
+
+		return False
+
 	def printInfo(self, maxDepth=3, indent=0):
 		tabs = '\t' * indent
 		Print.info('\n%sCnmt\n' % (tabs))
 		Print.info('%stitleId = %s' % (tabs, self.titleId))
 		Print.info('%sversion = %x' % (tabs, self.version))
 		Print.info('%stitleType = %x' % (tabs, self.titleType))
+		Print.info('%smetaAttr = %x' % (tabs, self.metaAttributes))
 
 		for i in self.contentEntries:
-			Print.info('%s\tncaId: %s  type = %x' % (tabs, i.ncaId, i.type))
+			Print.info('%s\tncaId: %s  type = %x, hash = %s' % (tabs, i.ncaId, i.type, hx(i.hash).decode('utf8' )))
 		super(Cnmt, self).printInfo(maxDepth, indent)

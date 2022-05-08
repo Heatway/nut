@@ -12,6 +12,7 @@ import nut
 import Server
 from gui.app import App
 from nut import Usb
+from nut import Hook
 
 threadRun = True
 
@@ -43,6 +44,8 @@ def run():
 	nut.initTitles()
 	nut.initFiles()
 
+	Hook.init()
+
 	app = QApplication(sys.argv)
 	app.setWindowIcon(QIcon('images/logo.jpg'))
 	ex = App()
@@ -62,3 +65,5 @@ def run():
 
 if __name__ == '__main__':
 	run()
+
+Hook.call("exit")

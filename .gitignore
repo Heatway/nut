@@ -1,35 +1,49 @@
+# python
 __pycache__/
 *.py[cod]
+Pipfile.lock
+environment.yml
 
+# workspace
 .DS_Store
-
 .vscode
-htmlcov
+
+# coverage
+htmlcov/
 .coverage
+.coverage.*
+.cache
+*.cover
 *.py,cover
+.pytest_cache/
 
+# config
 conf/nut.conf
-conf/user.conf
-conf/files.json
-conf/credentials.json
+conf/nut.conf.save
+conf/users.conf
+conf/blacklist.txt
+conf/blacklist.*.txt
 
+# metadata
 cache/
-titles/
 titledb/
 
-gdrive.token
-token.pickle
-credentials.json
-keys.txt
-
+# data
+titles/
+_NSPOUT/
+*.nsp
 *.nsz
 *.xci
 *.xcz
-*.nsz
 
-_NSPOUT
-
+keys.txt
+prod.keys
+gdrive.token
+token.pickle
+credentials.json
+file.verification.txt
 nut.lock
-
-# config file to switch between conda environments
-environment.yml
+nut2.lock
+*.bin
+*.token
+*.pem

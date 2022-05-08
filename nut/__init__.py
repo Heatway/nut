@@ -23,7 +23,7 @@ from tqdm import tqdm
 
 import Fs
 import Fs.Type
-from Fs import Cnmt, Nca, Nsp, Pfs0, Rom
+from Fs import Cnmt, Nca, Nsp, Pfs0, Rom, BaseFs
 from Fs.Pfs0 import Pfs0Stream
 from nut import (Config, Keys, Nsps, NszDecompressor, Print, Status, Title,
                  Titles, aes128)
@@ -41,7 +41,7 @@ isInitTitles = False
 isInitFiles = False
 hasScanned = False
 status = None
-scrapeThreads = 16
+scrapeThreads = 4
 scrapeQueue = None
 versionHistory = {}
 activeDownloads = []
@@ -59,39 +59,39 @@ class RegionLanguage:
 		self.preferredLanguage = preferredLanguage
 
 		if language == preferredLanguage:
-			self.score = 100
+			self.score = 1000
 		else:
 			self.score = 0
 
 		if region == preferredRegion:
-			self.score += 10
+			self.score += 100
 
 		if language == 'en' and region == 'US':
-			self.score += 5
+			self.score += 50
 
 		if language == 'fr' and region == 'FR':
-			self.score += 5
+			self.score += 50
 
 		if language == 'ja' and region == 'JP':
-			self.score += 5
+			self.score += 50
 
 		if language == 'es' and region == 'ES':
-			self.score += 5
+			self.score += 50
 
 		if region == 'GB':
-			self.score += 4
+			self.score += 40
 
 		if language == 'en':
-			self.score += 4
+			self.score += 40
 
 		if language == 'fr':
-			self.score += 3
+			self.score += 30
 
 		if language == 'es':
-			self.score += 1
+			self.score += 10
 
 		if language == 'de':
-			self.score += 1
+			self.score += 10
 
 	def __lt__(self, other):
 		return self.score < other.score
@@ -139,24 +139,6 @@ def sortedFs(nca):
 	fs.sort(key=lambda x: x.offset)
 	return fs
 
-def isNcaPacked(nca):
-	fs = sortedFs(nca)
-
-	if len(fs) == 0:
-		return True
-
-	next = ncaHeaderSize
-	for i in range(len(fs)):
-		if fs[i].offset != next:
-			return False
-
-		next = fs[i].offset + fs[i].size
-
-	if next != nca.size:
-		return False
-
-	return True
-
 def compress(filePath, compressionLevel=19, outputDir=None):
 	filePath = os.path.abspath(filePath)
 
@@ -181,8 +163,8 @@ def compress(filePath, compressionLevel=19, outputDir=None):
 	newNsp = Pfs0Stream(nszPath)
 
 	for nspf in container:
-		if isinstance(nspf, Fs.Nca) and (nspf.header.contentType == Fs.Type.Content.PROGRAM or nspf.header.contentType == Fs.Type.Content.PUBLICDATA):
-			if isNcaPacked(nspf):
+		if isinstance(nspf, Fs.Nca) and ((nspf.header.contentType == Fs.Type.Content.PROGRAM or nspf.header.contentType == Fs.Type.Content.PUBLICDATA) or int(nspf.header.titleId, 16) <= 0x0100000000001000):
+			if nspf.size > ncaHeaderSize * 2:
 				cctx = zstandard.ZstdCompressor(level=compressionLevel)
 
 				newFileName = nspf._path[0:-1] + 'z'
@@ -209,8 +191,26 @@ def compress(filePath, compressionLevel=19, outputDir=None):
 				compressor = cctx.stream_writer(f)
 
 				sections = []
+				sectionsTmp = []
 				for fs in sortedFs(nspf):
-					sections += fs.getEncryptionSections()
+					sectionsTmp += fs.getEncryptionSections()
+
+				currentOffset = ncaHeaderSize
+				for fs in sectionsTmp:
+					if fs.offset < ncaHeaderSize:
+						if fs.offset + fs.size < ncaHeaderSize:
+							currentOffset = fs.offset + fs.size
+							continue
+						else:
+							fs.size -= ncaHeaderSize - fs.offset
+							fs.offset = ncaHeaderSize
+					elif fs.offset > currentOffset:
+						sections.append(BaseFs.EncryptedSection(currentOffset, fs.offset - currentOffset, Fs.Type.Crypto.NONE, None, None))
+					elif fs.offset < currentOffset:
+						raise IOError("misaligned nca partitions")
+
+					sections.append(fs)
+					currentOffset = fs.offset + fs.size
 
 				header = b'NCZSECTN'
 				header += len(sections).to_bytes(8, 'little')
@@ -260,8 +260,6 @@ def compress(filePath, compressionLevel=19, outputDir=None):
 				newNsp.resize(newFileName, written)
 
 				continue
-			else:
-				Print.info('not packed!')
 
 		f = newNsp.add(nspf._path, nspf.size)
 		nspf.seek(0)
@@ -296,21 +294,21 @@ def ganymede(config):
 	initTitles()
 	initFiles()
 
-	g = Ganymede(config)
-	for k, t in Titles.items():
-		try:
-			if not t.isActive(skipKeyCheck=True):
-				continue
+	with Ganymede(config) as g:
+		for k, t in Titles.items():
+			try:
+				if not t.isActive(skipKeyCheck=True):
+					continue
 
-			lastestNsz = t.getLatestNsz()
+				lastestNsz = t.getLatestNsz()
 
-			if lastestNsz is None:
-				continue
+				if lastestNsz is None:
+					continue
 
-			g.push(t.id, lastestNsz.version, lastestNsz.path, lastestNsz.size)
+				g.push(t.id, lastestNsz.version, lastestNsz.path, lastestNsz.size)
 
-		except BaseException:
-			raise
+			except BaseException:
+				raise
 
 def compressAll(level=19):
 	initTitles()
@@ -336,6 +334,10 @@ def compressAll(level=19):
 			lastestNsp = t.getLatestNsp()
 
 			if not lastestNsp:
+				continue
+
+			if lastestNsp.titleId.endswith('000') and lastestNsp.version and int(lastestNsp.version) > 0:
+				Print.info('Cannot compress sparse file: ' + str(lastestNsp.path))
 				continue
 
 			lastestNsz = t.getLatestNsz()
@@ -491,6 +493,7 @@ def importRegion(region='US', language='en', save=True):
 		Print.info('Could not locate %s/%s !' % (region, language))
 		return False
 
+	Hook.call("import.pre", region, language)
 	regionLanguages = []
 
 	for region2 in Config.regionLanguages():
@@ -504,10 +507,16 @@ def importRegion(region='US', language='en', save=True):
 			if not regionTitle.id:
 				continue
 
-			title = Titles.get(regionTitle.id, None, None)
-			title.importFrom(regionTitle, rl.region, rl.language, preferredRegion=region, preferredLanguage=language)
+			try:
+				for tid in regionTitle.ids:
+					title = Titles.get(tid, None, None)
+					title.importFrom(regionTitle, rl.region, rl.language, preferredRegion=region, preferredLanguage=language)
+			except:
+				title = Titles.get(regionTitle.id, None, None)
+				title.importFrom(regionTitle, rl.region, rl.language, preferredRegion=region, preferredLanguage=language)
 
 	Titles.loadTxtDatabases()
+	Hook.call("import.post", region, language)
 	if save:
 		Titles.save()
 
@@ -595,7 +604,7 @@ def updateTitleDb(force=False):
 	except BaseException as e:
 		Print.error('error getting tinfoil.io titledb: ' + str(e))
 
-	fileList = ['demos.txt', 'dlcNames.txt', 'retailOnly.txt', 'ranks.txt']
+	fileList = []
 
 	for region, languages in Config.regionLanguages().items():
 		for language in languages:
@@ -702,7 +711,7 @@ def pullWorker(q, s):
 			with open(tmpFile, 'wb') as f:
 				serveFile(f, nsp.downloadPath, os.path.basename(nsp.path))
 
-			nsp = Fs.Nsp(tmpFile, None)
+			nsp = Fs.factory(tmpFile, tmpFile, None)
 			nsp.hasValidTicket = hasValidTicket
 			nsp.move(forceNsp=hasValidTicket)
 			Nsps.files[nsp.path] = nsp
@@ -727,16 +736,25 @@ def _ftpsync(url):
 
 	for path in fileList:
 		try:
-			#print('checking ' + path)
-			nsp = Fs.Nsp()
-			nsp.setPath(urllib.parse.unquote(path))
+			if path.split('.')[-1].lower() not in ('nsx', 'nsz', 'nsp', 'xci'):
+				continue
+
+			unq = urllib.parse.unquote(path)
+			nsp = Fs.factory(unq, unq, None)
 			nsp.downloadPath = path
 
 			if not nsp.titleId:
 				continue
 
-			if not Titles.contains(nsp.titleId) or (not len(Titles.get(nsp.titleId).getFiles(
-					path[-3:])) and Titles.get(nsp.titleId).isActive(skipKeyCheck=True)):
+			title = Titles.get(nsp.titleId)
+
+			if not title.isActive(skipKeyCheck=True):
+				continue
+
+			files = title.getFiles(path[-3:])
+			files = [x for x in files if int(x.version) >= int(nsp.version)]
+
+			if not len(files):
 				if path[-3:] == 'nsx':
 					if len(Titles.get(nsp.titleId).getFiles('nsp')) or len(Titles.get(nsp.titleId).getFiles('nsz')):
 						continue
@@ -1086,6 +1104,9 @@ def loadNcaData():
 	global cnmtData
 	global ncaData
 
+	if not os.path.isfile('titledb/cnmts.json'):
+		return
+
 	try:
 		with open('titledb/cnmts.json', encoding="utf-8-sig") as f:
 			tmpData = json.loads(f.read())
@@ -1185,7 +1206,29 @@ def getCnmt(titleId=None, version=None, obj=None):
 
 	return cnmtData[titleId][version]
 
-def extractNcaMeta():
+def extractCnmt(nsp):
+	isOpen = nsp.isOpen()
+	try:
+		if not isOpen:
+			nsp.open(nsp.path, 'rb')
+
+		for n in nsp:
+			if not isinstance(n, Nca):
+				continue
+
+			if int(n.header.contentType) == 1:
+				for p in n:
+					for m in p:
+						if isinstance(m, Cnmt):
+							return m
+	except BaseException as e:
+		Print.info('exception: %s %s' % (nsp.path, str(e)))
+	finally:
+		if not isOpen:
+			nsp.close()
+	return None
+
+def extractNcaMeta(files = []):
 	initTitles()
 	initFiles()
 
@@ -1193,21 +1236,35 @@ def extractNcaMeta():
 
 	global ncaData
 	q = {}
-	for path, nsp in Nsps.files.items():
-		if not nsp.path.endswith('.nsp'):  # and not nsp.path.endswith('.xci'):
-			continue
-		try:
-			if hasattr(nsp, 'extractedNcaMeta') and (nsp.extractedNcaMeta or nsp.extractedNcaMeta == 1) or '0100000000000816' in path:
-				# Print.info('skipping')
-				continue
 
-			if hasCnmt(nsp.titleId, nsp.version):
+	if not files or len(files) == 0:
+		for path, nsp in Nsps.files.items():
+			if not nsp.path.endswith('.nsp'):  # and not nsp.path.endswith('.xci'):
 				continue
+			try:
+				if hasattr(nsp, 'extractedNcaMeta') and (nsp.extractedNcaMeta or nsp.extractedNcaMeta == 1) or '0100000000000816' in path:
+					# Print.info('skipping')
+					continue
 
-			q[path] = nsp
-		except BaseException:
-			Print.info('exception: %s' % (path))
-			raise
+				if hasCnmt(nsp.titleId, nsp.version):
+					continue
+
+				q[path] = nsp
+			except BaseException:
+				Print.info('exception: %s' % (path))
+				raise
+	else:
+		for path in files:
+			try:
+				nsp = Nsps.registerFile(path, registerLUT = False)
+
+				if hasCnmt(nsp.titleId, nsp.version):
+					continue
+
+				q[path] = nsp
+			except BaseException:
+				Print.info('exception: %s' % (path))
+				raise
 
 	c = 0
 	for path, nsp in tqdm(q.items()):
@@ -1215,10 +1272,6 @@ def extractNcaMeta():
 			continue
 		try:
 			c += 1
-			if c > 50:
-				c = 0
-				saveNcaData()
-				# Nsps.save()
 
 			nsp.open(path, 'rb')
 
@@ -1305,14 +1358,17 @@ def extractNcaMeta():
 							for e in m.metaEntries:
 								cnmt.metaEntries.append({'titleId': e.titleId, 'version': e.version, 'type': e.type, 'install': e.install})
 
-							# print(cnmt.__dict__)
+							cnmt.requiredSystemVersion = m.requiredSystemVersion
+							cnmt.requiredApplicationVersion = m.requiredApplicationVersion
+							cnmt.otherApplicationId = m.otherApplicationId
 
 				# print(str(data.__dict__))
 			Print.info('processed %s' % nsp.path)
 			nsp.extractedNcaMeta = True
-			nsp.close()
 		except BaseException as e:
 			Print.info('exception: %s %s' % (path, str(e)))
+		finally:
+			nsp.close()
 
 	# save remaining files
 	saveNcaData()
@@ -1351,7 +1407,7 @@ def scrapeShogun(force=False, region=None):
 		cdn.Shogun.scrapeTitles(region, force=force)
 	Titles.saveAll()
 
-def scrapeShogunWorker(q, force=False):
+def scrapeShogunWorker(q, force = False, refresh = False):
 	while True:
 		region = q.get()
 
@@ -1359,21 +1415,19 @@ def scrapeShogunWorker(q, force=False):
 			break
 
 		try:
-			cdn.Shogun.scrapeTitles(region, force=force)
+			cdn.Shogun.scrapeTitles(region, force = force, refresh = refresh, save = False)
 		except BaseException as e:
 			Print.info('shogun worker exception: ' + str(e))
 			traceback.print_exc(file=sys.stdout)
 
 		q.task_done()
 
-def scrapeShogunThreaded(force=False):
-	if not hasCdn:
-		return
+def scrapeShogunThreaded(force = False, refresh = False):
 	initTitles()
 	initFiles()
 
 	scrapeThreads = []
-	numThreads = 8
+	numThreads = 4
 
 	if Config.reverse:
 		q = queue.LifoQueue()
@@ -1384,7 +1438,7 @@ def scrapeShogunThreaded(force=False):
 		q.put(region)
 
 	for i in range(numThreads):
-		t = threading.Thread(target=scrapeShogunWorker, args=[q, force])
+		t = threading.Thread(target=scrapeShogunWorker, args=[q, force, refresh])
 		t.daemon = True
 		t.start()
 		scrapeThreads.append(t)
@@ -1395,20 +1449,18 @@ def scrapeShogunThreaded(force=False):
 	for i in range(numThreads):
 		q.put(None)
 
+
 	i = 0
 	for t in scrapeThreads:
 		i += 1
 		t.join()
 		Print.info('joined thread %d of %d' % (i, len(scrapeThreads)))
-	# q.join()
 
 	Print.info('saving titles')
-	Titles.saveAll()
+	Titles.save()
 	Print.info('titles  saved')
 
 def scanLatestTitleUpdates():
-	if not hasCdn:
-		return
 	global versionHistory
 	initTitles()
 	initFiles()
@@ -1423,6 +1475,9 @@ def scanLatestTitleUpdates():
 					setVersionHistory(titleId, ver, date)
 	except BaseException:
 		pass
+
+	if not hasCdn:
+		return
 
 	for k, i in cdn.hacVersionList().items():
 		id = str(k).upper()
@@ -1440,7 +1495,7 @@ def scanLatestTitleUpdates():
 		else:
 			setVersionHistory(id, version, today)
 
-		if str(t.version) != str(version) and t.isActive():
+		if str(t.version) != str(version):
 			Print.info('new version detected for %s[%s] v%s' % (t.name or '', t.id or ('0' * 16), str(version)))
 			t.setVersion(version, True)
 
@@ -1468,7 +1523,6 @@ def downloadThread(i):
 				if path and os.path.isfile(path):
 					nsp = Fs.Nsp(path, None)
 					nsp.move()
-					Nsps.files[nsp.path] = nsp
 					Nsps.save()
 
 				if status is not None:
@@ -1552,3 +1606,18 @@ def downloadAll(wait=True):
 	#	status.close()
 
 	Print.info('DownloadAll finished')
+
+def writeJson(data, fileName):
+	tmpName = fileName + '.tmp'
+
+	try:
+		with open(tmpName, mode='w', encoding="utf-8") as outfile:
+			json.dump(data, outfile, indent=4, sort_keys=True)
+		os.unlink(fileName)
+		os.rename(tmpName, fileName)
+	except:
+		try:
+			os.unlink(tmpName)
+		except:
+			pass
+		raise

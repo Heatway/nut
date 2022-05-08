@@ -17,6 +17,7 @@ from nut import Nsps
 from tqdm import tqdm
 import Fs
 from Fs.BaseFs import BaseFs
+import shutil
 
 MEDIA_SIZE = 0x200
 
@@ -92,7 +93,7 @@ class Pfs0Stream():
 
 class Pfs0(BaseFs):
 	def __init__(self, buffer, path=None, mode=None, cryptoType=-1, cryptoKey=-1, cryptoCounter=-1):
-		super(Pfs0, self).__init__(buffer, path, mode, cryptoType, cryptoKey, cryptoCounter)
+		BaseFs.__init__(self, buffer, path, mode, cryptoType, cryptoKey, cryptoCounter)
 
 		if buffer:
 			self.size = int.from_bytes(buffer[0x48:0x50], byteorder='little', signed=False)
@@ -176,6 +177,10 @@ class Pfs0(BaseFs):
 
 			self.files.append(self.partition(offset + headerSize, f.size, f, autoOpen=False))
 
+		for f in self.files:
+			if type(f).__name__ != 'Nca':
+				continue
+
 		ticket = None
 
 		try:
@@ -207,16 +212,45 @@ class Pfs0(BaseFs):
 				self.files[i].name = stringTable[self.files[i].nameOffset:self.files[i+1].nameOffset].decode('utf-8').rstrip(' \t\r\n\0')
 		'''
 
-	def ticket(self, rightsId=None):
+	def ticket(self, rightsId=None, autoGenerate = False):
 		for f in self:
 			if type(f).__name__ == 'Ticket' and (rightsId is None or f._path == rightsId + '.tik'):
 				return f
+
+		if autoGenerate and rightsId is not None:
+			tikFile = os.path.join(os.path.dirname(self._path), rightsId.lower()) + '.tik'
+			with open('Ticket.tik', 'rb') as intik:
+				data = bytearray(intik.read())
+				data[0x180:0x190] = b'\x00' * 0x10
+				data[0x285] = int(rightsId[-2:], 16) + 1
+
+				data[0x2A0:0x2B0] = uhx(rightsId)
+
+				try:
+					with open(tikFile, 'wb') as f:
+						f.write(data)
+				except BaseException as e:
+					Print.error(str(e))
+
+			f = Fs.factory(tikFile)
+			f.open(tikFile, 'r+b')
+			return f
+
 		raise IOError('no ticket in NSP')
 
-	def cert(self, rightsId=None):
+	def cert(self, rightsId=None, autoGenerate = False):
 		for f in self:
 			if f._path.endswith('.cert') and (rightsId is None or f._path == rightsId + '.tik'):
 				return f
+
+		if autoGenerate and rightsId is not None:
+			certFile = os.path.join(os.path.dirname(self._path), rightsId.lower()) + '.cert'
+			shutil.copyfile('Certificate.cert', certFile)
+
+			f = Fs.factory(certFile)
+			f.open(certFile, 'r+b')
+			return f
+
 		raise IOError('no cert in NSP')
 
 	def cnmt(self):
@@ -266,28 +300,38 @@ class Pfs0(BaseFs):
 			elif f._path.endswith('.cert'):
 				certCount += 1
 
+		renameNcas = {}
+		renameNcaHashes = {}
+
 		for l in lst:
 			for f in l:
 				if type(f).__name__ == 'Nca':
 					if f.header.key() == b'\x04' * 16 or f.header.signature1 == b'\x00' * 0x100:
 						raise IOError('junk file')
 
+					if str(f.header.contentType) == 'Content.META':
+						continue
+
 					if f.restore():
-						oldName = os.path.basename(f._path)
-
-						if str(f.header.contentType) == 'Content.META':
-							newName = f.sha256()[0:32] + '.cnmt.nca'
-						else:
-							newName = f.sha256()[0:32] + '.nca'
-
 						if f.header.hasTitleRights():
 							rightsIds[f.header.rightsId] = True
 
+					oldName = os.path.basename(f._path)
+
+					hash = f.sha256()
+
+					newName = hash[0:32] + '.nca'
+					renameNcaHashes[oldName] = hash
+
+					if newName != oldName:
+						renameNcas[oldName] = newName
+					
+
 		if len(rightsIds) > ticketCount:
-			raise IOError('missing tickets in NSP, expected %d got %d in %s' % (len(rightsIds), ticketCount, self._path))
+			Print.error('missing tickets in NSP, expected %d got %d in %s' % (len(rightsIds), ticketCount, self._path))
 
 		if len(rightsIds) > certCount:
-			raise IOError('missing certs in NSP')
+			Print.error('missing certs in NSP')
 
 		for rightsId in rightsIds:
 			rightsId = rightsId.decode()
@@ -299,12 +343,12 @@ class Pfs0(BaseFs):
 			if ticketCount == 1:
 				ticket = self.ticket()
 			else:
-				ticket = self.ticket(rightsId)
+				ticket = self.ticket(rightsId, autoGenerate = True)
 
 			if ticketCount == 1:
 				cert = self.cert()
 			else:
-				cert = self.cert(rightsId)
+				cert = self.cert(rightsId, autoGenerate = True)
 
 			ticket.setRightsId(int(rightsId, 16))
 			ticket.setTitleKeyBlock(int(title.key, 16))
@@ -312,6 +356,45 @@ class Pfs0(BaseFs):
 
 			self.rename(os.path.basename(ticket._path), rightsId.lower() + '.tik')
 			self.rename(os.path.basename(cert._path), rightsId.lower() + '.cert')
+
+		self.flush()
+
+		for l in lst:
+			for f in l:
+				if type(f).__name__ == 'Nca':
+					if f.header.key() == b'\x04' * 16 or f.header.signature1 == b'\x00' * 0x100:
+						raise IOError('junk file')
+
+					if str(f.header.contentType) != 'Content.META':
+						continue
+
+					flush = False
+					for pfs0 in f:
+						for cnmt in pfs0:
+							if type(cnmt).__name__ == 'Cnmt':
+								for oldName, newName in renameNcas.items():
+									if cnmt.renameNca(oldName, newName, renameNcaHashes[oldName]):
+										self.rename(oldName, newName)
+										flush = True
+
+								for contentId, hash in renameNcaHashes.items():
+									cnmt.setHash(contentId, hash)
+
+								#if flush:
+								cnmt.flush()
+
+					#if flush:
+					f.updateFsHashes()
+
+					if f.restore():
+						oldName = os.path.basename(f._path)
+
+						if str(f.header.contentType) == 'Content.META':
+							newName = f.sha256()[0:32] + '.cnmt.nca'
+
+						if f.header.hasTitleRights():
+							rightsIds[f.header.rightsId] = True
+
 		return True
 
 	def printInfo(self, maxDepth=3, indent=0):

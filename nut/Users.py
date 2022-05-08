@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import re
 from nut import Print
@@ -54,7 +55,7 @@ class User:
 			pass
 
 	def getIsAdmin(self):
-		return str(self.isAdmin)
+		return 1 if self.isAdmin else 0
 
 	def setRequireAuth(self, requireAuth):
 		try:
@@ -117,7 +118,7 @@ def load(path='conf/users.conf'):
 		return
 
 	firstLine = True
-	map = ['id', 'password']
+	map = ['id', 'password', 'isAdmin']
 	with open(path, encoding="utf-8-sig") as f:
 		for line in f.readlines():
 			line = line.strip()
@@ -136,10 +137,7 @@ def load(path='conf/users.conf'):
 
 			Print.info('loaded user ' + str(t.id))
 
-def save():
-	pass
-
-def export(fileName='conf/users.conf', map=['id', 'password']):
+def export(fileName='conf/users.conf', map=['id', 'password', 'isAdmin']):
 	os.makedirs(os.path.dirname(fileName), exist_ok=True)
 	global users
 	buffer = ''
@@ -148,7 +146,7 @@ def export(fileName='conf/users.conf', map=['id', 'password']):
 	for k, t in users.items():
 		buffer += t.serialize(map) + '\n'
 
-	with open(fileName, 'w', encoding='utf-8') as csv:
+	with open(fileName, 'w', encoding='utf-8-sig') as csv:
 		csv.write(buffer)
 
 

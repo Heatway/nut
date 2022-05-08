@@ -5,7 +5,10 @@ from nut import Print
 class FileContext(Fs.driver.FileContext):
 	def __init__(self, url, sz, mode, parent):
 		super(FileContext, self).__init__(url, sz, mode, parent)
-		self.size = os.path.getsize(self.url)
+		if sz:
+			self.size = sz
+		else:
+			self.size = os.path.getsize(self.url)
 		self.handle = open(self.url, self.mode)
 
 	def close(self):
@@ -21,6 +24,11 @@ class FileContext(Fs.driver.FileContext):
 
 		if offset is not None:
 			self.handle.seek(int(offset), 0)
+
+			if size is None:
+				size =  self.size - offset
+		elif size is None:
+			size = self.size
 
 		r = self.handle
 
@@ -48,7 +56,7 @@ class DirContext(Fs.driver.DirContext):
 		for f in os.listdir(self.url):
 			path = os.path.join(self.url, f)
 			if os.path.isfile(path):
-				entries.append(Fs.driver.FileEntry(path, None))
+				entries.append(Fs.driver.FileEntry(path, os.path.getsize(path)))
 			else:
 				entries.append(Fs.driver.DirEntry(path))
 		return entries

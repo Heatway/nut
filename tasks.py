@@ -14,9 +14,9 @@ def coverage(c, details=False, gui=False):
 	c.run("coverage erase")
 	c.run("coverage run -m pytest --ignore tests-gui")
 	if gui:
-		c.run("coverage run -m pytest --ignore tests")
+		c.run("coverage run -a -m unittest tests-gui.gui_app_test")
 	if details:
-		c.run("coverage html && coverage annotate")
+		c.run("coverage annotate")
 		c.run("coverage report", pty=True)
 
 @task
@@ -27,7 +27,8 @@ def test(c):
 def lint(c):
 	run_arg = "pylint -j 4 nut/Config.py tests/ nut/Nsps.py nut/Hex.py nut_gui.py \
 		gui/panes/dirlist.py gui/panes/filters.py gui/panes/format.py Fs/driver/http.py \
-		nut/config_impl/download.py"
+		nut/config_impl/download.py gui/table_model.py gui/header.py gui/app.py \
+		gui/panes/options.py"
 	if os.name == 'nt': # Windows
 		c.run(run_arg)
 	else:

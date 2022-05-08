@@ -193,15 +193,17 @@ class Title:
 		return n
 
 	def getFiles(self, ext=None):
+		if len(fileLUT) == 0:
+			for path, f in Nsps.files.items():
+				tid = f.titleId.upper()
+				if tid not in fileLUT:
+					fileLUT[tid] = []
+				fileLUT[tid].append(f)
+
 		if self.id in fileLUT:
 			return self.filterExt(fileLUT[self.id], ext)
 
-		fileLUT[self.id] = []
-		for path, f in Nsps.files.items():
-			if(f.titleId == self.id):
-				fileLUT[self.id].append(f)
-
-		return self.filterExt(fileLUT[self.id], ext)
+		return []
 
 	def getLatestFile(self):
 		highestNsp = None
@@ -378,6 +380,21 @@ class Title:
 		else:
 			return False
 
+	def setIds(self, ids):
+		for id in ids:
+			self.setId(id)
+			break
+		self.ids = ids
+		
+	def addId(self, id):
+		id = id.upper()
+		self.setId(id)
+		try:
+			if id not in self.ids:
+				self.ids.append(id)
+		except:
+			self.ids = [id]
+
 	def setId(self, id):
 		if not hasattr(self, 'rank'):
 			self.rank = None
@@ -434,6 +451,13 @@ class Title:
 
 	def getBaseId(self):
 		return self.baseId or '0000000000000000'
+
+	def getBase(self):
+		baseId = getBaseId(self.id)
+		if Titles.contains(baseId):
+			return Titles.get(baseId)
+
+		return None
 
 	def setRegion(self, region):
 		if not self.region and re.match(r'[A-Z]{2}', region):

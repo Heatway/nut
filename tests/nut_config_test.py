@@ -30,8 +30,9 @@ def _get_default_config_object():
 			{'base': True, 'demo': False, 'DLC': True, 'update': False,
 			 'sansTitleKey': False, 'deltas': False, 'regions': [], 'rankMin': None, 'rankMax': None,
 			 'fileSizeMax': None, 'fileSizeMin': None, 'ratingMin': None, 'ratingMax': None,
-			 'releaseDateMin': None, 'releaseDateMax': None}, 'server': {'hostname': '0.0.0.0',
-																		 'port': 9000}, 'autolaunchBrowser': True, 'autoUpdateTitleDb': True}
+			 'releaseDateMin': None, 'releaseDateMax': None, 'mtime_min': None, 'mtime_max': None},
+			 'server': {'hostname': '0.0.0.0', 'port': 9000},
+			 'autolaunchBrowser': True, 'autoUpdateTitleDb': True, 'allowNoMetadata': True}
 
 def _get_default_config_path():
 	return 'conf/nut.conf'
@@ -47,12 +48,7 @@ def _create_files(fs, folder_obj):
 
 
 def _get_default_languages():
-	return json.loads('{"CO":["en","es"],"AR":["en","es"],"CL":["en","es"],\
-		"PE":["en","es"],"KR":["ko"],"HK":["zh"],"CN":["zh"],"NZ":["en"],"AT":["de"],\
-		"BE":["fr","nl"],"CZ":["en"],"DK":["en"],"ES":["es"],"FI":["en"],"GR":["en"],\
-		"HU":["en"],"NL":["nl"],"NO":["en"],"PL":["en"],"PT":["pt"],"RU":["ru"],"ZA":["en"],\
-		"SE":["en"],"MX":["en","es"],"IT":["it"],"CA":["en","fr"],"FR":["fr"],"DE":["de"],\
-		"JP":["ja"],"AU":["en"],"GB":["en"],"US":["es", "en"]}')
+	return json.loads(Config.DEFAULT_REGION_LANGUAGES)
 
 
 class NutConfigTest(TestCase):
@@ -72,9 +68,9 @@ class NutConfigTest(TestCase):
 		paths = Config.Paths()
 		server = Config.Server()
 		j = {}
-		Config.set(j, ['paths', 'scan'], paths.scan)
-		Config.set(j, ['server', 'hostname'], server.hostname)
-		Config.set(j, ['server', 'port'], server.port)
+		Config.jset(j, ['paths', 'scan'], paths.scan)
+		Config.jset(j, ['server', 'hostname'], server.hostname)
+		Config.jset(j, ['server', 'port'], server.port)
 
 		self.assertEqual(j['paths']['scan'], paths.scan)
 		self.assertEqual(j['server']['hostname'], server.hostname)

@@ -8,6 +8,7 @@ from hashlib import sha256
 import Fs.Type
 import os
 import re
+import math
 import pathlib
 from nut import Keys
 from nut import Config
@@ -21,10 +22,20 @@ from Fs.Pfs0 import Pfs0
 from Fs.BaseFs import BaseFs
 from Fs import Type
 from Fs.File import MemoryFile
+import traceback
+import sys
 
 
 MEDIA_SIZE = 0x200
 
+def rootFile(o):
+	try:
+		if o is None:
+			return None
+
+		return rootFile(o.f) or o._path
+	except:
+		return None
 
 class SectionTableEntry:
 	def __init__(self, d):
@@ -37,6 +48,144 @@ class SectionTableEntry:
 		self.unknown1 = int.from_bytes(d[0x8:0xc], byteorder='little', signed=False)
 		self.unknown2 = int.from_bytes(d[0xc:0x10], byteorder='little', signed=False)
 		self.sha1 = None
+
+class HierarchicalSha256:
+	def __init__(self, d, f, header):
+		self.f = f
+		self.data = d
+		self.hash = hx(d[0x0:0x20]).decode()
+		self.blockSize = int.from_bytes(d[0x20:0x24], byteorder='little', signed=False)
+		self.unk1 = int.from_bytes(d[0x24:0x28], byteorder='little', signed=False)
+		self.offset = int.from_bytes(d[0x28:0x30], byteorder='little', signed=False)
+		self.size = int.from_bytes(d[0x30:0x38], byteorder='little', signed=False)
+
+		self.pfs0Offset = int.from_bytes(d[0x38:0x40], byteorder='little', signed=False)
+		self.pfs0Size = int.from_bytes(d[0x40:0x48], byteorder='little', signed=False)		
+
+		self.multiplier = math.ceil(self.pfs0Size / self.blockSize)
+		self.header = header
+
+		self.verify()
+
+	def verify(self):
+		if self.unk1 != 2:
+			raise IOError('invalid HierarchicalSha256 value')
+
+		hash1 = sha256(uhx(self.getHashTable())).hexdigest()
+
+		if hash1 != self.hash:
+			Print.error('\n\n ********** invalid HierarchicalSha256 hash value ********** \n\n')
+
+	def getHashTable(self):
+		fs = self.header.fs.f
+		fs.seek(0)
+		data = fs.read(0x20*self.multiplier)
+		return hx(data).decode()
+
+	def calculateHashTableHash(self):
+		fs = self.header.fs.f
+		fs.seek(0)
+		data = fs.read(0x20*self.multiplier)
+		return sha256(data).hexdigest()
+
+	def getHashTableHash(self):
+		self.f.seek(self.header.hashOffset)
+		return hx(self.f.read(0x20)).decode()
+
+	def setHashTableHash(self, hash):
+		self.f.seek(self.header.hashOffset)
+		self.f.write(uhx(hash))
+
+	def calculateHash(self):
+		r = ''
+		fs = self.header.fs
+		remaining = self.pfs0Size
+		fs.seek(0)
+
+		for i in range(self.multiplier):
+			data = fs.read(min(remaining, self.blockSize))
+			remaining -= len(data)
+			r += sha256(data).hexdigest()
+		return r
+
+	def setHash(self):
+		newHash = uhx(self.calculateHash())
+		fs = self.header.fs.f
+		fs.seek(0)
+		fs.write(newHash)
+
+		sbhash = sha256(newHash).hexdigest()
+		self.setHashTableHash(sbhash)
+
+	def printInfo(self, maxDepth=3, indent=0):
+		tabs = '\t' * indent
+
+		Print.info(tabs + 'HierarchicalSha256: ')
+		Print.info(tabs + 'Block Size: ' + str(self.blockSize))
+		Print.info(tabs + 'Offset: ' + str(self.offset))
+		Print.info(tabs + 'Size: ' + str(self.size))
+		Print.info(tabs + 'PFS0 Offset: ' + str(self.pfs0Offset))
+		Print.info(tabs + 'PFS0 Size: ' + str(self.pfs0Size))
+		Print.info(tabs + 'Multiplier: ' + str(self.multiplier))
+
+		
+		
+		try:
+			storedHash = str(self.getHashTable()).lower()
+			calculatedHash = str(self.calculateHash()).lower()
+
+			if calculatedHash != storedHash:
+				Print.info(tabs + '** BAD CONTENT HASH **:')
+				Print.info(tabs + 'Hash Stored: ' + storedHash)
+				Print.info(tabs + 'Hash Clcltd: ' + calculatedHash)
+		except BaseException as e:
+			Print.info(tabs + 'Hash Clcltd: ' + str(e))
+		Print.info(tabs + 'Hash Table Hash Stored: ' + str(self.getHashTableHash()))
+
+		Print.info(tabs + 'Hash Table Hash Actual: ' + self.calculateHashTableHash())
+
+class FsHeader:
+	def __init__(self, f, fs = None):
+		self.version = f.readInt16()
+		self.fsType = f.readInt8()
+		self.hashType = f.readInt8()
+		self.encryptionType = f.readInt8()
+		self.padding = f.read(3)
+		self.hashOffset = f.tell()
+		self.hashInfo = f.read(0xF8)
+		self.patchInfo = f.read(0x40)
+		self.generation = f.readInt32()
+		self.secureValue = f.readInt32()
+		self.sparseInfo = f.read(0x30)
+		self.reserved = f.read(0x88)
+
+		self.hash = None
+		self.fs = fs
+
+		try:
+			if self.hashType == 2:
+				self.hash = HierarchicalSha256(self.hashInfo, f, self)
+		except BaseException as e:
+			Print.error(str(e))
+
+	def printInfo(self, maxDepth=3, indent=0):
+		tabs = '\t' * indent
+		Print.info('\n')
+		Print.info(tabs + 'version: ' + str(self.version))
+		Print.info(tabs + 'fsType: ' + str(self.fsType))
+		Print.info(tabs + 'hashType: ' + str(self.hashType))
+		Print.info(tabs + 'encryptionType: ' + str(self.encryptionType))
+		Print.info(tabs + 'padding: ' + hx(self.padding).decode())
+		Print.info(tabs + 'generation: ' + str(self.generation))
+		Print.info(tabs + 'secureValue: ' + str(self.secureValue))
+
+		if self.hash:
+			self.hash.printInfo(maxDepth, indent+1)
+
+		#Print.info(tabs + 'hashInfo: ' + hx(self.hashInfo).decode())
+		Print.info(tabs + 'patchInfo: ' + hx(self.patchInfo).decode())
+		Print.info(tabs + 'sparseInfo: ' + hx(self.sparseInfo).decode())
+		#Print.info(tabs + 'reserved: ' + hx(self.reserved).decode())
 
 
 def GetSectionFilesystem(buffer, cryptoKey):
@@ -100,13 +249,24 @@ class NcaHeader(File):
 		if self.magic not in [b'NCA3', b'NCA2']:
 			raise Exception('Failed to decrypt NCA header: ' + str(self.magic))
 
+		containerPath = rootFile(self)
+		if containerPath:
+			tikFile = os.path.join(os.path.dirname(containerPath), self.rightsId.decode('utf-8').lower()) + '.tik'
+
+			if os.path.isfile(tikFile):
+				tik = Fs.factory(tikFile)
+				tik.open(tikFile, 'r+b')
+				title = Titles.get(tik.titleId())
+				title.key = format(tik.getTitleKeyBlock(), 'X').zfill(32)
+				tik.close()
+
 		self.sectionHashes = []
 
 		for i in range(4):
 			self.sectionTables.append(SectionTableEntry(self.read(0x10)))
 
 		for i in range(4):
-			self.sectionHashes.append(self.sectionTables[i])
+			self.sectionHashes.append(hx(self.read(0x20)).decode())
 
 		self.masterKey = (self.cryptoType if self.cryptoType > self.cryptoType2 else self.cryptoType2)-1
 
@@ -140,6 +300,17 @@ class NcaHeader(File):
 			self.titleKeyDec = self.key()
 
 		return True
+
+	def calculateFsHeaderHash(self, index):
+		self.seek(0x400 + (index * 0x200))
+		buffer = self.read(0x200)
+		h = sha256(buffer).hexdigest()
+
+		return h
+
+	def getFsHeader(self, index, fs = None):
+		self.seek(0x400 + (index * 0x200))
+		return FsHeader(self, fs = fs)
 
 	def realTitleId(self):
 		if not self.hasTitleRights():
@@ -354,8 +525,7 @@ class Nca(File):
 			#Print.info('fs section start = ' + hex(fs.sectionStart))
 			#Print.info('titleKey = ' + hex(self.header.titleKeyDec))
 
-			self.partition(self.header.sectionTables[i].offset, self.header.sectionTables[i].endOffset -
-						   self.header.sectionTables[i].offset, section, cryptoKey=self.header.titleKeyDec)
+			self.partition(self.header.sectionTables[i].offset, self.header.sectionTables[i].endOffset - self.header.sectionTables[i].offset, section, cryptoKey=self.header.titleKeyDec)
 
 			try:
 				section.partition(fs.sectionStart, section.size - fs.sectionStart, fs)
@@ -368,7 +538,11 @@ class Nca(File):
 				self.sectionFilesystems.append(fs)
 				self.sections.append(section)
 
-			fs.open(None, 'rb')
+			try:
+				fs.open(None, 'rb')
+			except BaseException as e:
+				Print.error(str(e))
+				traceback.print_exc(file=sys.stdout)
 
 		self.titleKeyDec = None
 
@@ -391,6 +565,26 @@ class Nca(File):
 		except BaseException:
 			raise
 			return None
+
+	def updateFsHashes(self):
+		for i in range(4):
+			tbl = self.header.sectionTables[i]
+
+			if not tbl.endOffset:
+				continue
+
+			header = self.header.getFsHeader(i, fs = self.sectionFilesystems[i])
+
+			if header.hash:
+				header.hash.setHash()
+
+			hash = self.header.calculateFsHeaderHash(i)
+			self.header.seek(0x280 + (i * 0x20))
+			hash2 = hx(self.header.read(0x20))
+			self.header.seek(0x280 + (i * 0x20))
+			self.header.write(uhx(hash))
+
+		self.flush()
 
 	def verifyHeader(self):
 		return self.header.verify()
@@ -520,7 +714,7 @@ class Nca(File):
 		Print.info(tabs + 'verified header = ' + str(self.header.verify()))
 		Print.info(tabs + 'magic = ' + str(self.header.magic))
 		Print.info(tabs + 'titleId = ' + str(self.header.titleId))
-		Print.info(tabs + 'rightsId = ' + str(self.header.rightsId))
+		Print.info(tabs + 'rightsId = ' + str(self.header.rightsId.decode()))
 		Print.info(tabs + 'isGameCard = ' + hex(self.header.isGameCard))
 		Print.info(tabs + 'contentType = ' + str(self.header.contentType))
 		Print.info(tabs + 'cryptoType = ' + str(self.cryptoType))
@@ -528,6 +722,39 @@ class Nca(File):
 		Print.info(tabs + 'crypto master key: ' + str(self.header.cryptoType))
 		Print.info(tabs + 'crypto master key2: ' + str(self.header.cryptoType2))
 		Print.info(tabs + 'key Index: ' + str(self.header.keyIndex))
+
+		try:
+			Print.info('\n' + tabs + 'FsSections:')
+			for i in range(4):
+				tbl = self.header.sectionTables[i]
+
+				if not tbl.endOffset:
+					continue
+
+				Print.info('\t%soffset = %X, endOffset = %X' % (tabs, tbl.offset, tbl.endOffset))
+
+				actualHash = self.header.calculateFsHeaderHash(i)
+
+				if actualHash != str(self.header.sectionHashes[i]):
+					Print.info('\t%s ** HASH MISMATCH! **' % (tabs))
+					Print.info('\t%sstored hash = %s' % (tabs, str(self.header.sectionHashes[i])))
+					Print.info('\t%sactual hash = %s' % (tabs, actualHash))
+		except:
+			pass
+
+		try:
+			Print.info('\n\n' + tabs + 'FsHeaders:')
+			for i in range(4):
+				tbl = self.header.sectionTables[i]
+
+				if not tbl.endOffset:
+					continue
+
+				self.header.getFsHeader(i, fs = self.sectionFilesystems[i]).printInfo(maxDepth = maxDepth, indent = indent + 1)
+
+			Print.info('\n')
+		except:
+			pass
 
 		'''
 		encTitleBlock = hx(self.header.getKeyBlock()).decode()
@@ -549,7 +776,7 @@ class Nca(File):
 			Print.info(tabs + 'build Id: ' + str(self.buildId()))
 
 		if self.header.signature1:
-			Print.info(tabs + 'Signature1: ' + str(self.header.signature1))
+			Print.info(tabs + 'Signature1: ' + hx(self.header.signature1).decode())
 
 		if self.header.signature2:
-			Print.info(tabs + 'Signature2: ' + str(self.header.signature2))
+			Print.info(tabs + 'Signature2: ' + hx(self.header.signature2).decode())

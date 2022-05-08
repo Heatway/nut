@@ -9,10 +9,25 @@ import re
 import nut
 import shutil
 
+reTID = re.compile(r'.*\[([a-zA-Z0-9]{16})\].*')
+reBaseTID = re.compile(r'^([a-zA-Z0-9]{16})\..*')
+reVER = re.compile(r'.*\[v([0-9]+)\].*')
+reCOMP = re.compile(r'.*\[CR([0-9]{1,3})\].*')
+
 class IndexedFile:
-	def __init__(self, path):
+	def __init__(self, path, mode='rb', cryptoType = -1, cryptoKey = -1, cryptoCounter = -1):
+		self.path = None
+		self.titleId = None
+		self.timestamp = None
+		self.version = None
+		self.fileSize = None
+		self.fileModified = None
+		self.extractedNcaMeta = False
+
 		self.cr = None
 		self.hasValidTicket = None
+		self.verified = None
+		self.attributes = {}
 
 		if path:
 			self.setPath(path)
@@ -23,10 +38,26 @@ class IndexedFile:
 	def __iter__(self):
 		return self.files.__iter__()
 
+	def getExtractedNcaMeta(self):
+		if hasattr(self, 'extractedNcaMeta') and self.extractedNcaMeta:
+			return 1
+		return 0
+
+	def setExtractedNcaMeta(self, val):
+		if val and (val != 0 or val):
+			self.extractedNcaMeta = True
+		else:
+			self.extractedNcaMeta = False
+
+	def getHasValidTicket(self):
+		if self.title().isUpdate:
+			return 1
+		return (1 if self.hasValidTicket and self.hasValidTicket else 0)
+
 	def isUpdateAvailable(self):
 		title = self.title()
 
-		if self.titleId and str(title.version) is not None and str(self.version) < str(title.version) and str(title.version) != '0':
+		if self.titleId and title.version is not None and int(self.version) < int(title.version) and int(title.version) != 0:
 			return {'id': title.id, 'baseId': title.baseId, 'currentVersion': str(self.version), 'newVersion': str(title.version)}
 
 		if not title.isUpdate and not title.isDLC and Titles.contains(title.updateId):
@@ -98,16 +129,13 @@ class IndexedFile:
 			Print.error('no path set')
 			return False
 
-		if os.path.abspath(self.path).startswith(os.path.abspath(Config.paths.nspOut)) and not self.path.endswith(
-				'.nsz') and not self.path.endswith('.xcz') and Config.compression.auto:
+		if os.path.abspath(self.path).startswith(os.path.abspath(Config.paths.nspOut)) and not self.path.endswith('.nsz') and not self.path.endswith('.xcz') and Config.compression.auto:
 			nszFile = nut.compress(self.path, Config.compression.level, os.path.abspath(Config.paths.nspOut))
 
 			if nszFile:
-				nsp = Fs.Nsp(nszFile, None)
+				nsp = Nsps.registerFile(nszFile)
 				nsp.hasValidTicket = True
 				nsp.move(forceNsp=True)
-				Nsps.files[nsp.path] = nsp
-				Nsps.save()
 
 		newPath = self.fileName(forceNsp=forceNsp)
 
@@ -115,19 +143,31 @@ class IndexedFile:
 			Print.error('could not get filename for ' + self.path)
 			return False
 
-		if os.path.abspath(newPath).lower().replace('\\', '/') == os.path.abspath(self.path).lower().replace('\\', '/'):
+		newPath = os.path.abspath(newPath)
+
+		if newPath.lower().replace('\\', '/') == self.path.lower().replace('\\', '/'):
 			return False
 
 		if os.path.isfile(newPath):
 			Print.info('\nduplicate title: ')
 			Print.info(os.path.abspath(self.path))
-			Print.info(os.path.abspath(newPath))
+			Print.info(newPath)
 			Print.info('\n')
 			return False
 
-		if not self.verifyNcaHeaders():
-			Print.error('verification failed: could not move title for ' + str(self.titleId) + ' or ' + str(Title.getBaseId(self.titleId)))
-			return False
+		if self.isOpen():
+			if not self.verifyNcaHeaders():
+				Print.error('verification failed: could not move title for ' + str(self.titleId) + ' or ' + str(Title.getBaseId(self.titleId)))
+				return False
+		else:
+			try:
+				self.open(self.path)
+				if not self.verifyNcaHeaders():
+					Print.error('verification failed: could not move title for ' + str(self.titleId) + ' or ' + str(Title.getBaseId(self.titleId)))
+					return False
+			finally:
+				self.close()
+		
 
 		try:
 			Print.info(self.path + ' -> ' + newPath)
@@ -140,10 +180,8 @@ class IndexedFile:
 				if self.isOpen():
 					self.close()
 				shutil.move(self.path, newPath)
-
-				if self.path in Nsps.files:
-					del Nsps.files[self.path]
-				Nsps.files[newPath] = self
+				Nsps.moveFile(self.path, newPath)
+				#Nsps.files[newPath] = self
 				self.path = newPath
 		except BaseException as e:
 			Print.error('failed to rename file! %s -> %s  : %s' % (self.path, newPath, e))
@@ -183,15 +221,31 @@ class IndexedFile:
 		s = re.sub(r'[\/\\\:\*\?\"\<\>\|\.\s™©®()\~]+', ' ', s)
 		return s.strip()
 
+	def setValue(self, name, value):
+		self.attributes[name] = value
+
+	def getValue(self, name):
+		try:
+			return self.attributes[name]
+		except:
+			return None
+
 	def dict(self):
-		return {
+		r = {
 			"titleId": self.titleId,
 			"hasValidTicket": self.hasValidTicket,
 			'extractedNcaMeta': self.getExtractedNcaMeta(),
 			'version': self.version,
 			'timestamp': self.timestamp,
 			'path': self.path,
-			'fileSize': self.fileSize}
+			'verified': self.verified,
+			'fileSize': self.fileSize
+		}
+
+		for k,v in self.attributes.items():
+			r['__' + k] = v
+
+		return r
 
 	def getCr(self, inverted=False):
 		if not hasattr(self, 'cr') or not self.cr:
@@ -227,14 +281,35 @@ class IndexedFile:
 		else:
 			return '%02d' % int(self.cr)
 
+	def getFileVersion(self):
+		if not Config.extractVersion:
+			return self.version
+
+		val = self.getValue('version')
+
+		if val:
+			return val
+
+		cnmt = nut.extractCnmt(self)
+
+		if cnmt is not None:
+			self.version = cnmt.version
+			self.setValue('version', self.version)
+
+		return self.version
+
 	def fileName(self, forceNsp=False):
 		bt = None
 
 		if self.titleId not in Titles.keys():
 			if not Title.getBaseId(self.titleId) in Titles.keys():
-				Print.error('could not find base title for ' + str(self.titleId) + ' or ' + str(Title.getBaseId(self.titleId)))
-				return None
-			bt = Titles.get(Title.getBaseId(self.titleId))
+				if Config.allowNoMetadata:
+						bt = Title.Title()
+				else:
+					Print.error('could not find base title for ' + str(self.titleId) + ' or ' + str(Title.getBaseId(self.titleId)))
+					return None
+			else:
+				bt = Titles.get(Title.getBaseId(self.titleId))
 			t = Title.Title()
 			if bt.name is not None:
 				t.loadCsv(self.titleId + '0000000000000000|0000000000000000|' + bt.name)
@@ -249,12 +324,17 @@ class IndexedFile:
 
 			try:
 				if t.baseId not in Titles.keys():
-					Print.info('could not find baseId for ' + self.path)
-					return None
+					if Config.allowNoMetadata:
+						bt = Title.Title()
+					else:
+						Print.info('could not find baseId for ' + self.path)
+						return None
+				else:
+					bt = Titles.get(t.baseId)
 			except BaseException as e:
 				Print.error('exception: could not find title id ' + str(self.titleId) + ' ' + str(e))
 				return None
-			bt = Titles.get(t.baseId)
+			
 
 		isNsx = not self.hasValidTicket and not forceNsp
 
@@ -285,7 +365,7 @@ class IndexedFile:
 		format = format.replace('{id}', self.cleanFilename(t.id))
 		format = format.replace('{region}', self.cleanFilename(t.getRegion() or bt.getRegion()))
 		format = format.replace('{name}', newName)
-		format = format.replace('{version}', str(self.getVersion() or 0))
+		format = format.replace('{version}', str(self.getFileVersion() or 0))
 		format = format.replace('{baseId}', self.cleanFilename(bt.id))
 
 		if '{cr}' in format:
@@ -319,6 +399,19 @@ class IndexedFile:
 
 		return None
 
+	def getFileSize(self):
+		if self.fileSize is None:
+			try:
+				self.fileSize = os.path.getsize(self.path)
+			except BaseException as e:
+				Print.error(f"getting file size of title `{self.path}`: {str(e)}")
+		return self.fileSize
+
+	def getFileModified(self):
+		if self.fileModified is None:
+			self.fileModified = os.path.getmtime(self.path)
+		return self.fileModified
+
 	def baseName(self):
 		return os.path.basename(self.path)
 
@@ -326,11 +419,11 @@ class IndexedFile:
 		self.path = path
 		self.version = '0'
 
-		z = re.match(r'.*\[([a-zA-Z0-9]{16})\].*', path, re.I)
+		z = reTID.match(path)
 		if z:
 			self.titleId = z.groups()[0].upper()
 		else:
-			z = re.match(r'^([a-zA-Z0-9]{16})\..*', os.path.basename(path), re.I)
+			z = reBaseTID.match(os.path.basename(path))
 			if z:
 				self.titleId = z.groups()[0].upper()
 			else:
@@ -340,7 +433,7 @@ class IndexedFile:
 		if not hasattr(self, 'cr') or not self.cr:
 			self.cr = self.getCrFromPath()
 
-		z = re.match(r'.*\[v([0-9]+)\].*', path, re.I)
+		z = reVER.match(path, re.I)
 
 		if z:
 			self.version = z.groups()[0]

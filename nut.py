@@ -24,6 +24,7 @@ import requests
 from nut import Hex
 from nut import Print
 from nut import NszDecompressor
+from nut import Hook
 import threading
 import signal
 from nut import Status
@@ -383,7 +384,7 @@ def download(id):
 
 if __name__ == '__main__':
 	try:
-		with FileLock("nut.lock") as lock:
+		with FileLock("nut2.lock") as lock:
 			urllib3.disable_warnings()
 
 			#signal.signal(signal.SIGINT, handler)
@@ -393,7 +394,8 @@ if __name__ == '__main__':
 			parser.add_argument('-g', '--ganymede', help='ganymede config file')
 			parser.add_argument('-i', '--info', help='show info about title or file')
 			parser.add_argument('--depth', type=int, default=1, help='max depth for file info and extraction')
-			parser.add_argument('-I', '--verify', nargs=2, help='verify title key TID TKEY')
+			parser.add_argument('-I', '--verify-title-key', nargs=2, help='verify title key TID TKEY')
+			parser.add_argument('--verify-all-signatures', action="store_true", help='verify nca signatures')
 			parser.add_argument('--restore', action="store_true", help='attempt to restore a NSP to original valid form')
 			parser.add_argument('-N', '--verify-ncas', help='Verify NCAs in container')
 			parser.add_argument('-u', '--unlock', action="store_true", help='install available title key into NSX / NSP')
@@ -402,6 +404,7 @@ if __name__ == '__main__':
 			parser.add_argument('--move', action="store_true", help='Rename and move files to their correct location')
 			parser.add_argument('-s', '--scan', action="store_true", help='scan for new NSP files')
 			parser.add_argument('-o', '--organize', action="store_true", help='rename and move all NSP files')
+			parser.add_argument('--extract-version', action="store_true", help='extract version from cnmt when organizing')
 			parser.add_argument('-U', '--update-titles', action="store_true", help='update titles db from urls')
 			parser.add_argument('--update-check', action="store_true", help='check for existing titles needing updates')
 			parser.add_argument('-r', '--refresh', action="store_true", help='reads all meta from NSP files and queries CDN for latest version information')
@@ -432,7 +435,7 @@ if __name__ == '__main__':
 			parser.add_argument('--gen-tinfoil-titles', action="store_true", help='Outputs language files for Tinfoil')
 			parser.add_argument('-O', '--organize-ncas', help='Organize unsorted NCA\'s')
 			parser.add_argument('--export-nca-map', help='Export JSON map of titleid to NCA mapping')
-			parser.add_argument('--extract-nca-meta', action="store_true", help='Extract nca metadata from NSPs')
+			parser.add_argument('--extract-nca-meta', nargs='*', help='Extract nca metadata from NSPs')
 			parser.add_argument('-C', action="store_true", help='Compress NSP')
 			parser.add_argument('-l', '--level', type=int, default=19, help='Compression Level')
 			parser.add_argument('--output', help='Directory to save the output files')
@@ -451,6 +454,8 @@ if __name__ == '__main__':
 			parser.add_argument('--rating-max', type=int, help='Rating maximum')
 			parser.add_argument('--rank-min', type=int, help='Rank minimum')
 			parser.add_argument('--rank-max', type=int, help='Rank maximum')
+			parser.add_argument('--mtime-min', type=int, help='mtime minimum')
+			parser.add_argument('--mtime-max', type=int, help='mtime maximum')
 			parser.add_argument('--base', type=int, choices=[0, 1], default=Config.download.base*1, help='download base titles')
 			parser.add_argument('--demo', type=int, choices=[0, 1], default=Config.download.demo*1, help='download demo titles')
 			parser.add_argument('--update', type=int, choices=[0, 1], default=Config.download.update*1, help='download title updates')
@@ -470,13 +475,23 @@ if __name__ == '__main__':
 				parser.add_argument('--scrape-title', help='Scrape title from Nintendo servers')
 				parser.add_argument('--scrape-nsuid', help='Scrape eshop title by nsuid')
 				parser.add_argument('--scrape-shogun', nargs='*', help='Scrape ALL titles from shogun')
+				parser.add_argument('--scrape-shogun-missed', nargs='*', help='Scrape titles that are not advertised by shogun but in our database')
 				parser.add_argument('--scrape-shogun-delta', nargs='*', help='Scrape new titles from shogun')
 				parser.add_argument('-E', '--get-edge-token', action="store_true", help='Get edge token')
 				parser.add_argument('--get-dauth-token', action="store_true", help='Get dauth token')
 				parser.add_argument('--eshop-latest', action="store_true", help='List newest eshop titles')
 				parser.add_argument('--cetk', help='Pull ticket by rightsID')
+				parser.add_argument('--cdn-cache-only', action="store_true", help='Only hit cdn cache')
+				parser.add_argument('--cdn-save-languages', action="store_true", help='store language / region data from cdn')
+
+			Hook.init()
+			Hook.call("args.pre", parser)
 
 			args = parser.parse_args()
+
+			if hasCdn:
+				if args.cdn_cache_only:
+					Config.cdnCacheOnly = True
 
 			if args.hostname:
 				args.server = True
@@ -510,27 +525,33 @@ if __name__ == '__main__':
 			if args.rank_max:
 				Config.download.rankMax = args.rank_max
 
+			if args.mtime_min:
+				Config.download.mtime_min = args.mtime_min
+
+			if args.mtime_max:
+				Config.download.mtime_max = args.mtime_max
+
 			if args.reverse:
 				Config.reverse = True
 			else:
 				Config.reverse = False
+
+			if args.extract_version:
+				Config.extractVersion = True
 
 			if args.json:
 				Config.jsonOutput = True
 
 			Status.start()
 
-			Print.info('						,;:;;,')
-			Print.info('					   ;;;;;')
-			Print.info('			   .=\',	;:;;:,')
-			Print.info('			  /_\', "=. \';:;:;')
-			Print.info(r'			  @=:__,  \,;:;:\'')
-			Print.info(r'				_(\.=  ;:;;\'')
-			Print.info('			   `"_(  _/="`')
-			Print.info('				`"\'')
-
-			if args.scan:
-				Config.isScanning = True
+			Print.info('                        ,;:;;,')
+			Print.info('                       ;;;;;')
+			Print.info('               .=\',    ;:;;:,')
+			Print.info('              /_\', "=. \';:;:;')
+			Print.info('              @=:__,  \,;:;:\'')
+			Print.info('                _(\.=  ;:;;\'')
+			Print.info('               `"_(  _/="`')
+			Print.info('                `"\'')
 
 			if args.dry:
 				Config.dryRun = True
@@ -597,9 +618,6 @@ if __name__ == '__main__':
 						i = Nsp(path)
 						i.move()
 
-			if args.decompress_all:
-				nut.decompressAll()
-
 			if args.update_titles:
 				nut.initTitles()
 				for url in Config.titleUrls:
@@ -637,6 +655,10 @@ if __name__ == '__main__':
 				exit(0)
 
 			if hasCdn:
+				if args.cdn_save_languages:
+					cdn.Shogun.saveLanguages()
+					cdn.Shogun.saveRegions()
+
 				if args.cetk:
 					cdn.Tigers.cetk(args.cetk)
 
@@ -645,7 +667,10 @@ if __name__ == '__main__':
 
 				if args.scrape_nsuid:
 					nut.initTitles()
-					print(json.dumps(cdn.Shogun.scrapeTitle(int(args.scrape_nsuid), force=True).__dict__))
+					region = args.region or 'US'
+					language = args.language or 'en'
+					print(json.dumps(cdn.Shogun.scrapeTitle(int(args.scrape_nsuid), region=region, language=language, force=True).__dict__))
+					Titles.saveRegion(region, language)
 
 			if args.usb:
 				try:
@@ -660,6 +685,9 @@ if __name__ == '__main__':
 				nut.initFiles()
 				nut.scan()
 
+			if args.pull:
+				nut.pull()
+
 			if args.refresh:
 				nut.initTitles()
 				nut.initFiles()
@@ -670,18 +698,60 @@ if __name__ == '__main__':
 				nut.initFiles()
 				refresh(True)
 
-			if args.extract_nca_meta:
-				nut.extractNcaMeta()
-
-			if args.organize:
+			if args.verify_all_signatures:
 				nut.initTitles()
 				nut.initFiles()
-				nut.organize()
 
-			if args.pull:
-				nut.pull()
+				filesToScan = {}
 
-			if args.verify:
+				for path, nsp in Nsps.files.items():
+					try:
+						f = nsp
+
+						if f.verified:
+							continue
+
+						if f.titleId and not f.title().isActive():
+							continue
+
+						if Config.download.mtime_min and f.getFileModified() < Config.download.mtime_min:
+							continue
+
+						if Config.download.mtime_max and f.getFileModified() > Config.download.mtime_max:
+							continue
+
+						filesToScan[path] = nsp
+					except:
+						pass
+
+				with open('file.verification.txt', 'w+', encoding="utf-8") as bf:
+					s = Status.create(len(filesToScan), desc='Verifying files...', unit='B')
+					for path, nsp in filesToScan.items():
+						try:
+							f = nsp
+
+							f.open(str(path), 'r+b')
+
+							if not f.verifyNcaHeaders():
+								nsp.verified = False
+								raise IOError('bad file')
+
+							nsp.verified = True
+
+							Print.info('good file: ' + str(path))
+							bf.write('good file: %s\n' % str(path))
+							f.close()
+						except:
+							f.close()
+							Print.error('bad file: ' + str(path))
+							bf.write('bad file: %s\n' % str(path))
+
+						s.add()
+					s.close()
+				Nsps.save()
+
+
+			if args.verify_title_key:
 				nut.initTitles()
 				nut.initFiles()
 				if blockchain.verifyKey(args.verify[0], args.verify[1]):
@@ -692,10 +762,19 @@ if __name__ == '__main__':
 			if args.restore:
 				nut.initTitles()
 				nut.initFiles()
+				prev = Config.extractVersion
+				Config.extractVersion = True
 
 				for path in expandFiles(args.file):
 					try:
 						f = Fs.factory(str(path))
+						f.setPath(str(path))
+						if f and f.titleId:
+							dt = Nsps.getByTitleId(f.titleId)
+							if dt and int(dt.version) >= int(f.getFileVersion()):
+								f.moveDupe()
+								continue
+
 						f.open(str(path), 'r+b')
 						f.restore()
 						f.close()
@@ -706,12 +785,14 @@ if __name__ == '__main__':
 							Print.info('moving %s -> %s' % (path, newPath))
 							shutil.move(f._path, newPath)
 					except BaseException as e:
+						f.close()
 						if str(e) == 'junk file':
-							f.close()
-							os. remove(f._path)
+							os.remove(f._path)
 						else:
 							print('Failed to restore: %s, %s' % (str(e), path))
-							# traceback.print_exc(file=sys.stdout)
+							traceback.print_exc(file=sys.stdout)
+
+				Config.extractVersion = prev
 
 			if args.info:
 				nut.initTitles()
@@ -742,7 +823,7 @@ if __name__ == '__main__':
 					nut.initFiles()
 					for d in args.download:
 						download(d)
-					
+
 				if args.system_update:
 					cdn.downloadSystemUpdate()
 
@@ -754,19 +835,34 @@ if __name__ == '__main__':
 						nut.initFiles()
 						for i in args.scrape_shogun:
 							if len(i) == 16:
-								l = cdn.Shogun.ids(i, force=True)
-								if not l or len(l) == 0 or len(l['id_pairs']) == 0:
-									print('no nsuId\'s found')
-								else:
-									print(l)
-									for t in l['id_pairs']:
-										print('nsuId: ' + str(t['id']))
-										print(json.dumps(cdn.Shogun.scrapeTitle(t['id']).__dict__))
-										Titles.saveRegion('US', 'en')
+								for region in Config.regionLanguages():
+									if args.region and region != args.region:
+										continue
+
+									for language in Config.regionLanguages()[region]:
+										if args.language and args.language != language:
+											continue
+
+										l = cdn.Shogun.ids(i, region = region, language = language or 'en', force=True)
+										print('searching %s %s' % (region, language))
+										if not l or len(l) == 0 or len(l['id_pairs']) == 0:
+											print('\tno nsuId\'s found')
+										else:
+											print(l)
+											for t in l['id_pairs']:
+												print('\tnsuId: ' + str(t['id']))
+												print(json.dumps(cdn.Shogun.scrapeTitle(t['id'], region=region, language=language, force=True).__dict__))
+											Titles.saveRegion(region, language)
+								Titles.save()
 							elif len(i) == 2:
 								cdn.Shogun.scrapeTitles(i, force=True)
 							else:
 								print('bleh')
+
+				if args.scrape_shogun_missed != None:
+					nut.initTitles()
+					nut.initFiles()
+					nut.scrapeShogunThreaded(False, refresh = True)
 
 				if args.scrape_shogun_delta is not None:
 					nut.scrapeShogunThreaded(False)
@@ -837,6 +933,10 @@ if __name__ == '__main__':
 			if args.move:
 				nut.initTitles()
 				nut.initFiles()
+
+				prev = Config.extractVersion
+				Config.extractVersion = True
+
 				for path in expandFiles(args.file):
 					try:
 						f = Fs.Nsp()
@@ -846,6 +946,9 @@ if __name__ == '__main__':
 						Print.info('error moving: ' + str(e))
 						traceback.print_exc(file=sys.stdout)
 						raise
+
+				Config.extractVersion = prev
+
 				Nsps.save()
 
 			if args.export_nca_map:
@@ -855,6 +958,17 @@ if __name__ == '__main__':
 				nut.initTitles()
 				nut.initFiles()
 				nut.compressAll(19 if args.level is None else args.level)
+
+			if args.decompress_all:
+				nut.decompressAll()
+
+			if args.extract_nca_meta is not None:
+				nut.extractNcaMeta(args.extract_nca_meta)
+
+			if args.organize:
+				nut.initTitles()
+				nut.initFiles()
+				nut.organize()
 
 			if args.export:
 				nut.initTitles()
@@ -872,6 +986,8 @@ if __name__ == '__main__':
 			if args.match_demos:
 				matchDemos()
 
+			Hook.call("args.post", args)
+
 			if args.server:
 				nut.initTitles()
 				nut.initFiles()
@@ -885,13 +1001,6 @@ if __name__ == '__main__':
 				except BaseException:
 					pass
 				blockchain.run()
-
-			if len(sys.argv) == 1:
-				nut.scan()
-				nut.organize()
-				nut.downloadAll()
-				nut.scanLatestTitleUpdates()
-				nut.export('titledb/versions.txt', ['id', 'rightsId', 'version'])
 
 			if args.export_verified_keys:
 				exportVerifiedKeys(args.export_verified_keys)
@@ -918,3 +1027,5 @@ if __name__ == '__main__':
 		raise
 
 	Print.info('fin')
+
+Hook.call("exit")

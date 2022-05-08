@@ -57,6 +57,8 @@ class Ticket(File):
 		self.masterKeyRevision = self.readInt8()
 
 	def seekStart(self, offset):
+		if self.signatureType not in self.signatureSizes:
+			raise IOError('invalid signature type: ' + str(self.signatureType))
 		self.seek(0x4 + self.signatureSizes[self.signatureType] + self.signaturePadding + offset)
 
 	def getSignatureType(self):
@@ -189,7 +191,11 @@ class Ticket(File):
 	def printInfo(self, maxDepth=3, indent=0):
 		tabs = '\t' * indent
 
-		rightsId = format(self.getRightsId(), 'X').zfill(32)
+		try:
+			rightsId = format(self.getRightsId(), 'X').zfill(32)
+		except:
+			Print.info('\n%sInvalid Ticket\n' % (tabs))
+			return
 		titleId = rightsId[0:16]
 		titleKey = format(self.getTitleKeyBlock(), 'X').zfill(32)
 
@@ -204,7 +210,10 @@ class Ticket(File):
 		Print.info(tabs + 'accountId = ' + str(self.accountId))
 		Print.info(tabs + 'titleId = ' + titleId)
 		Print.info(tabs + 'titleKey = ' + titleKey)
-		Print.info(tabs + 'titleKeyDec = ' + str(hx(Keys.decryptTitleKey((self.getTitleKey()), self.masterKeyRevision))))
+		try:
+			Print.info(tabs + 'titleKeyDec = ' + str(hx(Keys.decryptTitleKey((self.getTitleKey()), self.masterKeyRevision))))
+		except BaseException as e:
+			Print.info(tabs + 'titleKeyDec = ' + str(e))
 
 		'''
 		try:

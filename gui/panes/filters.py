@@ -4,20 +4,12 @@ from PyQt5.QtWidgets import (QCheckBox, QGridLayout, QGroupBox, QHBoxLayout,
 							 QLabel, QSizePolicy, QVBoxLayout, QWidget, QScrollArea, QFrame)
 from qt_range_slider import QtRangeSlider
 
+import humanize
+
 from nut import Config
 from translator import tr
 
 
-# pylint: disable=fixme
-# TODO: move to a separate module
-def _format_size(num, suffix='B'):
-	if num is None:
-		return ''
-	for unit in ['', 'Ki', 'Mi', 'Gi', 'Ti', 'Pi', 'Ei', 'Zi']:
-		if abs(num) < 1024.0:
-			return "%3.1f %s%s" % (num, unit, suffix)
-		num /= 1024.0
-	return "%.1f %s%s" % (num, 'Yi', suffix)
 
 class ConfCheckbox(QCheckBox):
 	"""ConfCheckbox
@@ -97,11 +89,14 @@ class Region(QWidget):
 class Filters(QWidget):
 	"""Filters
 	"""
-	def __init__(self):
+	def __init__(self): # pylint: disable=too-many-locals
 		super().__init__()
 
 		self.MIN_FILE_SIZE = 0
 		self.MAX_FILE_SIZE = 30 * 1024**3
+		self.MIN_RANK = 1
+		self.MAX_RANK = 1000
+		self.DEFAULT_RANK = 200
 
 		self.scroll = QScrollArea(self)
 		self.scroll.setWidgetResizable(True)
@@ -118,44 +113,60 @@ class Filters(QWidget):
 		sizeFilterGroup = QGroupBox(tr('filters.size.group'))
 		sizeFilterLayout = QHBoxLayout(sizeFilterGroup)
 
-		minFileSizeFilter = 0
-		if Config.download.fileSizeMax is not None:
+		minFileSizeFilter = self.MIN_FILE_SIZE
+		if Config.download.fileSizeMin is not None:
 			minFileSizeFilter = Config.download.fileSizeMin
 		maxFileSizeFilter = self.MAX_FILE_SIZE
 		if Config.download.fileSizeMax is not None:
 			maxFileSizeFilter = Config.download.fileSizeMax
 
 		filterMinSizeLabel = Filters._createLeftLabel(sizeFilterLayout, minFileSizeFilter)
+		sizeFilter = self._createRangeSlider(sizeFilterLayout, self.MIN_FILE_SIZE, self.MAX_FILE_SIZE,
+			minFileSizeFilter, maxFileSizeFilter)
+		filterMaxSizeLabel = Filters._createRightLabel(sizeFilterLayout, sizeFilter.get_right_thumb_value())
 
-		rangeSlider = self._createRangeSlider(sizeFilterLayout, minFileSizeFilter, maxFileSizeFilter)
-
-		filterMaxSizeLabel = Filters._createRightLabel(sizeFilterLayout, rangeSlider.get_right_thumb_value())
+		sizeFilter.left_thumb_value_changed.connect((lambda x: \
+			Filters._on_thumb_value_changed(filterMinSizeLabel, x, "fileSizeMin")))
+		sizeFilter.right_thumb_value_changed.connect((lambda x: \
+			Filters._on_thumb_value_changed(filterMaxSizeLabel, x, "fileSizeMax")))
 
 		layout.addWidget(sizeFilterGroup)
+
+		rankFilterGroup = QGroupBox(tr('filters.rank.group'))
+		rankFilterLayout = QHBoxLayout(rankFilterGroup)
+
+		minRankFilter = self.MIN_RANK
+		if Config.download.rankMin is not None:
+			minRankFilter = Config.download.rankMin
+		maxRankFilter = self.DEFAULT_RANK
+		if Config.download.rankMax is not None:
+			maxRankFilter = Config.download.rankMax
+
+		filterMinRankLabel = Filters._createLeftLabel(rankFilterLayout, minRankFilter, isSize=False)
+		rankFilter = self._createRangeSlider(rankFilterLayout, self.MIN_RANK, self.MAX_RANK,
+			minRankFilter, maxRankFilter)
+		filterMaxRankLabel = Filters._createRightLabel(rankFilterLayout, rankFilter.get_right_thumb_value(),
+			isSize=False)
+
+		rankFilter.left_thumb_value_changed.connect((lambda x: \
+			Filters._on_thumb_value_changed(filterMinRankLabel, x, "rankMin", isSize=False)))
+		rankFilter.right_thumb_value_changed.connect((lambda x: \
+			Filters._on_thumb_value_changed(filterMaxRankLabel, x, "rankMax", isSize=False)))
+
+		layout.addWidget(rankFilterGroup)
 
 		widget = QWidget()
 		widget.setLayout(layout)
 		self.scroll.setWidget(widget)
-
-		rangeSlider.left_thumb_value_changed.connect((lambda x: \
-			Filters._on_left_thumb_value_changed(filterMinSizeLabel, x)))
-		rangeSlider.right_thumb_value_changed.connect((lambda x: \
-			Filters._on_right_thumb_value_changed(filterMaxSizeLabel, x)))
 
 	def resizeEvent(self, _):
 		self.scroll.setFixedWidth(self.width())
 		self.scroll.setFixedHeight(self.height())
 
 	@staticmethod
-	def _on_left_thumb_value_changed(label, value):
-		label.setText(_format_size(value))
-		Config.download.fileSizeMin = value
-		Config.save()
-
-	@staticmethod
-	def _on_right_thumb_value_changed(label, value):
-		label.setText(_format_size(value))
-		Config.download.fileSizeMax = value
+	def _on_thumb_value_changed(label, value, config_param, isSize=True):
+		label.setText(humanize.naturalsize(value, True) if isSize else str(value))
+		setattr(Config.download, config_param, value)
 		Config.save()
 
 	@staticmethod
@@ -183,21 +194,21 @@ class Filters(QWidget):
 		layout.addWidget(typesGroup)
 
 	@staticmethod
-	def _createLeftLabel(layout, value):
-		return Filters._createLabel(layout, value, Qt.AlignRight)
+	def _createLeftLabel(layout, value, isSize=True):
+		return Filters._createLabel(layout, value, Qt.AlignRight, isSize)
 
 	@staticmethod
-	def _createRightLabel(layout, value):
-		return Filters._createLabel(layout, value, Qt.AlignLeft)
+	def _createRightLabel(layout, value, isSize=True):
+		return Filters._createLabel(layout, value, Qt.AlignLeft, isSize)
 
-	def _createRangeSlider(self, layout, minValue, maxValue):
-		rangeSlider = QtRangeSlider(self, self.MIN_FILE_SIZE, self.MAX_FILE_SIZE, minValue, maxValue)
+	def _createRangeSlider(self, layout, defaultMinValue, defaultMaxValue, minValue, maxValue): # pylint: disable=too-many-arguments
+		rangeSlider = QtRangeSlider(self, defaultMinValue, defaultMaxValue, minValue, maxValue)
 		layout.addWidget(rangeSlider)
 		return rangeSlider
 
 	@staticmethod
-	def _createLabel(layout, value, alignment):
-		label = QLabel(f"{_format_size(value)}")
+	def _createLabel(layout, value, alignment, isSize=True):
+		label = QLabel(f"{humanize.naturalsize(value, True) if isSize else value}")
 		label.setFixedWidth(80)
 		label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 		label.setAlignment(alignment)

@@ -7,7 +7,8 @@ import threading
 import time
 
 import Fs
-from nut import Config, Print, Status, Title
+from nut import Config, Print, Status, Title, Hook
+import nut
 
 files = {}
 
@@ -19,19 +20,35 @@ def get(key):
 	return files[key]
 
 def getByTitleId(id_):
+	highest = None
 	for _, f in files.items():
 		if f.titleId == id_:
-			return f
-	return None
+			if highest is None or int(f.version) > int(highest.version):
+				highest = f
+	return highest
 
-def registerFile(path):
+def registerFile(path, registerLUT = True):
 	path = os.path.abspath(path)
 
-	nsp = Fs.Nsp(path, None)
-	files[path] = nsp
+	if not path in files:
+		nsp = Fs.factory(path, path, None)
+		nsp.timestamp = time.time()
+		nsp.getFileSize()
 
-	if nsp.titleId:
-		Title.fileLUT[nsp.titleId].append(nsp)
+		files[path] = nsp
+
+		Hook.call("files.register", nsp)
+	else:
+		nsp = files[path]
+
+	if registerLUT and nsp.titleId:
+		if nsp.titleId not in Title.fileLUT:
+			Title.fileLUT[nsp.titleId] = []
+
+		if nsp not in Title.fileLUT[nsp.titleId]:
+			Title.fileLUT[nsp.titleId].append(nsp)
+
+	return nsp
 
 def unregisterFile(path):
 	path = os.path.abspath(path)
@@ -42,9 +59,30 @@ def unregisterFile(path):
 
 	if nsp.titleId and nsp.titleId in Title.fileLUT:
 		# Title.fileLUT[nsp.titleId].remove(nsp)
-		Title.fileLUT[nsp.titleId] = [item for item in Title.fileLUT[nsp.titleId]
-									  if item.path != nsp.path]
+		if nsp.titleId in Title.fileLUT:
+			Title.fileLUT[nsp.titleId] = [item for item in Title.fileLUT[nsp.titleId] if item.path != nsp.path]
 	del files[path]
+
+	Hook.call("files.unregister", nsp)
+	return True
+
+def moveFile(path, newPath):
+	path = os.path.abspath(path)
+	newPath = os.path.abspath(newPath)
+
+	if path == newPath:
+		return False
+
+	if path not in files:
+		return registerFile(newPath)
+
+	nsp = files[path]
+
+	nsp.setPath(newPath)
+	files[newPath] = nsp
+	del files[path]
+
+	Hook.call("files.move", nsp, path)
 	return True
 
 def _is_file_hidden(filepath):
@@ -59,14 +97,14 @@ def scan(base):
 	nspOut = os.path.abspath(Config.paths.nspOut)
 	duplicatesFolder = os.path.abspath(Config.paths.duplicates)
 
-	Print.info('scanning %s' % base)
+	Print.info(f"scanning {base}")
 	for root, _, _files in os.walk(base, topdown=False):
 		for name in _files:
 			if _is_file_hidden(name):
 				continue
 			suffix = pathlib.Path(name).suffix
 
-			if suffix in ('.nsp', '.nsx', '.xci', '.nsz'):
+			if suffix in ('.nsp', '.nsx', '.xci', '.nsz', '.xcz'):
 				path = os.path.abspath(root + '/' + name)
 				if not path.startswith(nspOut) and not path.startswith(duplicatesFolder):
 					fileList[path] = name
@@ -81,19 +119,16 @@ def scan(base):
 		for path, name in fileList.items():
 			try:
 				status.add(1)
+				path = os.path.abspath(path)
 
 				if path not in files:
 					Print.info('scanning ' + name)
 
-					nsp = Fs.Nsp(path, None)
-					nsp.timestamp = time.time()
-					nsp.getFileSize()  # cache file size
-
-					files[nsp.path] = nsp
+					registerFile(path)
 
 					i = i + 1
-					if i % 20 == 0:
-						save()
+					#if i % 20 == 0:
+					#	save()
 			except KeyboardInterrupt:
 				status.close()
 				raise
@@ -149,7 +184,33 @@ def _fill_nsp_from_json_object(nsp, json_object):
 	else:
 		nsp.extractedNcaMeta = False
 
+	if 'verified' in json_object:
+		nsp.verified = json_object['verified']
+	else:
+		nsp.verified = None
+
 	nsp.cr = json_object['cr'] if 'cr' in json_object else None
+
+	nsp.attributes = {}
+
+	for k,v in nsp.__dict__.items():
+		if k.startswith('__'):
+			nsp.attributes[k[2:]] = v
+
+class FileListCache: # pylint: disable=too-few-public-methods
+	def __init__(self):
+		self.cache = {}
+
+	def isfile(self, path):
+		parent = os.path.abspath(os.path.join(path, os.pardir))
+		if parent not in self.cache:
+			tmp = {}
+			for f in os.listdir(parent):
+				tmp[f] = f
+			self.cache[parent] = tmp
+
+		return os.path.basename(path) in self.cache[parent]
+
 
 def load(fileName='titledb/files.json', verify=True):
 	global hasLoaded  # pylint: disable=global-statement
@@ -160,38 +221,32 @@ def load(fileName='titledb/files.json', verify=True):
 	hasLoaded = True
 
 	timestamp = time.perf_counter()
+	cache = FileListCache()
 
 	if os.path.isfile(fileName):
 		with open(fileName, encoding="utf-8-sig") as f:
 			for k in json.loads(f.read()):
-				_nsp = Fs.Nsp(k['path'], None)
+				_nsp = Fs.factory(k['path'], k['path'], None)
 
-				if not _load_nsp_filesize(k, _nsp) or not _nsp.path:
+				if not _load_nsp_filesize(k, _nsp) or not hasattr(_nsp, 'path') or not _nsp.path:
 					continue
 
 				_fill_nsp_from_json_object(_nsp, k)
 
 				path = os.path.abspath(_nsp.path)
-				if verify and Config.isScanning:
-					if os.path.isfile(path) and os.path.exists(path) and not _is_file_hidden(path):
+				if verify:
+					if cache.isfile(path) and not _is_file_hidden(path):
 						files[path] = _nsp
 				else:
 					files[path] = _nsp
 	Print.info('loaded file list in ' + str(time.perf_counter() - timestamp) + ' seconds')
 
 def save(fileName='titledb/files.json'):
-	lock.acquire()
-
-	try:
+	with lock:
 		j = []
 		for _, k in files.items():
 			j.append(k.dict())
-		with open(fileName, 'w') as outfile:
-			json.dump(j, outfile, indent=4, sort_keys=True)
-	except BaseException:
-		lock.release()
-		raise
-	lock.release()
+		nut.writeJson(j, fileName)
 
 
 if os.path.isfile('files.json'):

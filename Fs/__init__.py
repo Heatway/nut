@@ -8,22 +8,21 @@ from Fs.Ticket import Ticket
 from Fs.Cnmt import Cnmt
 from Fs.File import File
 
-def factory(name):
-	if name.endswith('.xci'):
-		f = Xci()
-	elif name.endswith('.nsp') or name.endswith('.nsz'):
-		f = Nsp()
-	elif name.endswith('.nsx'):
-		f = Nsp()
-	elif name.endswith('.nca') or name.endswith('.ncz'):
-		f = Nca()
-	elif name.endswith('.nacp'):
-		f = Nacp()
-	elif name.endswith('.tik'):
-		f = Ticket()
-	elif name.endswith('.cnmt'):
-		f = Cnmt()
+def factory(name, file=None, mode='rb'):
+	ext = name.split('.')[-1]
+	if ext == 'xci' or ext == 'xcz':
+		f = Xci(file, mode)
+	elif ext == 'nsp' or ext == 'nsz' or ext == 'nsx':
+		f = Nsp(file, mode)
+	elif ext == 'nca' or ext == 'ncz':
+		f = Nca(file, mode)
+	elif ext == 'nacp':
+		f = Nacp(file, mode)
+	elif ext == 'tik':
+		f = Ticket(file, mode)
+	elif ext == 'cnmt':
+		f = Cnmt(file, mode)
 	else:
-		f = File()
+		f = File(file, mode)
 
 	return f

@@ -1,7 +1,9 @@
 import pycurl
 import io
 import os
+import certifi
 import Fs.driver
+from bs4 import BeautifulSoup
 from nut import Print
 
 class FileContext(Fs.driver.FileContext):
@@ -29,6 +31,7 @@ class FileContext(Fs.driver.FileContext):
 	def read(self, sz=None):
 		curl = pycurl.Curl()
 		curl.setopt(pycurl.URL, self.url)
+		curl.setopt(pycurl.CAINFO, certifi.where())
 		output = io.BytesIO()
 		curl.setopt(pycurl.WRITEFUNCTION, output.write)
 		self.setup(curl, None, sz)
@@ -40,6 +43,7 @@ class FileContext(Fs.driver.FileContext):
 		try:
 			curl = pycurl.Curl()
 			curl.setopt(pycurl.URL, self.url)
+			curl.setopt(pycurl.CAINFO, certifi.where())
 			output = io.BytesIO()
 			curl.setopt(pycurl.WRITEFUNCTION, callback)
 			self.setup(curl, offset, size)
@@ -60,14 +64,34 @@ class DirContext(Fs.driver.DirContext):
 				entries.append(Fs.driver.FileEntry(path, None))
 		return entries
 
+	def processHtml(self, result):
+		entries = []
+
+		soup = BeautifulSoup(result)
+		for tag in soup.findAll('a', href=True):
+			name = tag['href']
+
+			if name.startswith('./'):
+				name = name[2:]
+
+			path = os.path.join(self.url, name)
+
+			if '.' in name:
+				entries.append(Fs.driver.FileEntry(path, None))
+
+		return entries
+
 	def ls(self):
 		curl = pycurl.Curl()
 		curl.setopt(pycurl.URL, self.url)
+		curl.setopt(pycurl.CAINFO, certifi.where())
 		output = io.BytesIO()
 		curl.setopt(pycurl.DIRLISTONLY, 1)
 		curl.setopt(pycurl.WRITEFUNCTION, output.write)
 		curl.perform()
 
+		if self.url.lower().startswith('http'):
+			return self.processHtml(output.getvalue().decode('utf8'))
 		return self.processLs(output.getvalue().decode('utf8'))
 
 
@@ -79,3 +103,6 @@ class Curl(Fs.driver.Interface):
 
 
 Fs.driver.registry.add('ftp', Curl)
+Fs.driver.registry.add('http', Curl)
+Fs.driver.registry.add('https', Curl)
+
